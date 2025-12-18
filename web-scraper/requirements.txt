@@ -1,0 +1,8 @@
+xlwings==0.33.11  # required
+python-dotenv==1.0.1  # required
+pyodide-http  # required
+black  # required
+pandas
+matplotlib
+seaborn
+requests

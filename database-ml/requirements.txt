@@ -1,0 +1,12 @@
+xlwings==0.33.11  # required
+python-dotenv==1.0.1  # required
+pyodide-http  # required
+black  # required
+pandas
+matplotlib
+seaborn
+requests==2.31.0  # for HTTP requests
+certifi==2024.12.14  # for SSL certificates
+urllib3==2.1.0  # for URL handling
+scikit-learn>=1.0.2  # for model scoring
+xgboost>=1.5.0  # for XGBoost model
