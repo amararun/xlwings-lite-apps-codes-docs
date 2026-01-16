@@ -12,8 +12,7 @@
 #   === SECTION: SCHEMA_DISPLAY ===
 #   === SECTION: SCRIPT_TOKEN_ACCESS ===
 #   === SECTION: SCRIPT_SHARELINK ===
-#   === SECTION: SCRIPT_RAW_IMPORT ===      (NEW)
-#   === SECTION: SCRIPT_RAW_TESTS ===       (NEW)
+#   === SECTION: SCRIPT_RAW_IMPORT ===
 #   === SECTION: REMOTE_LOADER ===
 #   === SECTION: SCRIPT_RUN_STATS ===
 #
@@ -22,11 +21,8 @@
 # =============================================================================
 # @script import_via_token      - TOKEN_ACCESS sheet (Dropbox/GDrive/GitHub OAuth)
 # @script import_via_sharelink  - SHARE_LINK_ACCESS sheet (public/private URLs)
-# @script import_raw_sharelink  - SHARE_LINK_ACCESS sheet (raw file download)  (NEW)
-# @script import_raw_token      - TOKEN_ACCESS sheet (raw file download)       (NEW)
-# @script test_last_image       - Test last imported image file                 (NEW)
-# @script test_last_zip         - Test last imported ZIP file                   (NEW)
-# @script test_last_pdf         - Test last imported PDF file                   (NEW)
+# @script import_raw_sharelink  - SHARE_LINK_ACCESS sheet (raw file download)
+# @script import_raw_token      - TOKEN_ACCESS sheet (raw file download)
 # @script run_stats             - Auto-detect and run stats module
 #
 # =============================================================================
@@ -2319,209 +2315,6 @@ async def import_raw_token(book: xw.Book):
     print(f"Size: {file_size_mb:.2f} MB")
     print(f"Path: {temp_path}")
     print("=" * 60)
-
-
-# === SECTION: SCRIPT_RAW_TESTS ===
-# =============================================================================
-# SCRIPT: TEST FUNCTIONS FOR RAW IMPORTS (NEW)
-# =============================================================================
-
-@script
-async def test_last_image(book: xw.Book):
-    """
-    Test the last imported image file (PNG, JPG, GIF).
-    Displays dimensions and basic info.
-    """
-    print("=" * 60)
-    print("IMAGE FILE TEST")
-    print("=" * 60)
-
-    state = get_last_import_state()
-    if not state:
-        print("ERROR: No previous import found!")
-        print("   Run import_raw_sharelink first")
-        return
-
-    file_path = state.get('file_path')
-    file_type = state.get('file_type', '').lower()
-
-    if not file_path or not os.path.exists(file_path):
-        print(f"ERROR: File not found: {file_path}")
-        return
-
-    print(f"   Testing file: {file_path}")
-    print(f"   File type: {file_type}")
-
-    # Check if it's an image type
-    image_types = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp']
-    if file_type not in image_types:
-        print(f"\nWARNING: Last import was '{file_type}', not an image")
-        print(f"   Expected one of: {', '.join(image_types)}")
-
-    try:
-        # Try to use PIL/Pillow (available in Pyodide)
-        from PIL import Image
-
-        img = Image.open(file_path)
-        width, height = img.size
-        mode = img.mode
-        img_format = img.format
-
-        print("\n   IMAGE INFO:")
-        print(f"   - Dimensions: {width} x {height} pixels")
-        print(f"   - Mode: {mode}")
-        print(f"   - Format: {img_format}")
-        print(f"   - File size: {os.path.getsize(file_path) / 1024:.1f} KB")
-
-        img.close()
-
-        print("\n" + "=" * 60)
-        print("IMAGE TEST PASSED!")
-        print("=" * 60)
-
-    except ImportError:
-        print("\nERROR: PIL/Pillow not available in this environment")
-        print("   Cannot read image dimensions")
-
-        # Fallback: just check file exists and size
-        file_size = os.path.getsize(file_path)
-        print(f"\n   FILE INFO (basic):")
-        print(f"   - File exists: Yes")
-        print(f"   - File size: {file_size / 1024:.1f} KB")
-
-    except Exception as e:
-        print(f"\nERROR: Failed to read image: {e}")
-
-
-@script
-async def test_last_zip(book: xw.Book):
-    """
-    Test the last imported ZIP file.
-    Lists entries (max 50) and shows total count.
-    """
-    print("=" * 60)
-    print("ZIP FILE TEST")
-    print("=" * 60)
-
-    state = get_last_import_state()
-    if not state:
-        print("ERROR: No previous import found!")
-        print("   Run import_raw_sharelink first")
-        return
-
-    file_path = state.get('file_path')
-    file_type = state.get('file_type', '').lower()
-
-    if not file_path or not os.path.exists(file_path):
-        print(f"ERROR: File not found: {file_path}")
-        return
-
-    print(f"   Testing file: {file_path}")
-    print(f"   File type: {file_type}")
-
-    if file_type != 'zip':
-        print(f"\nWARNING: Last import was '{file_type}', not a ZIP file")
-
-    try:
-        import zipfile
-
-        if not zipfile.is_zipfile(file_path):
-            print("\nERROR: File is not a valid ZIP archive")
-            return
-
-        with zipfile.ZipFile(file_path, 'r') as zf:
-            entries = zf.namelist()
-            total_count = len(entries)
-
-            # Calculate total uncompressed size
-            total_size = sum(info.file_size for info in zf.infolist())
-
-            print(f"\n   ZIP CONTENTS:")
-            print(f"   - Total entries: {total_count}")
-            print(f"   - Total uncompressed size: {total_size / (1024*1024):.2f} MB")
-            print(f"   - Archive size: {os.path.getsize(file_path) / (1024*1024):.2f} MB")
-
-            # Show first 50 entries
-            print(f"\n   ENTRIES (first 50 of {total_count}):")
-            for i, entry in enumerate(entries[:50]):
-                info = zf.getinfo(entry)
-                size_kb = info.file_size / 1024
-                print(f"   {i+1:3}. {entry} ({size_kb:.1f} KB)")
-
-            if total_count > 50:
-                print(f"   ... and {total_count - 50} more entries")
-
-        print("\n" + "=" * 60)
-        print("ZIP TEST PASSED!")
-        print("=" * 60)
-
-    except Exception as e:
-        print(f"\nERROR: Failed to read ZIP: {e}")
-
-
-@script
-async def test_last_pdf(book: xw.Book):
-    """
-    Test the last imported PDF file.
-    Attempts basic validation.
-    """
-    print("=" * 60)
-    print("PDF FILE TEST")
-    print("=" * 60)
-
-    state = get_last_import_state()
-    if not state:
-        print("ERROR: No previous import found!")
-        print("   Run import_raw_sharelink first")
-        return
-
-    file_path = state.get('file_path')
-    file_type = state.get('file_type', '').lower()
-
-    if not file_path or not os.path.exists(file_path):
-        print(f"ERROR: File not found: {file_path}")
-        return
-
-    print(f"   Testing file: {file_path}")
-    print(f"   File type: {file_type}")
-
-    if file_type != 'pdf':
-        print(f"\nWARNING: Last import was '{file_type}', not a PDF file")
-
-    try:
-        file_size = os.path.getsize(file_path)
-
-        # Check PDF magic bytes
-        with open(file_path, 'rb') as f:
-            header = f.read(8)
-
-        is_valid_pdf = header.startswith(b'%PDF')
-
-        print(f"\n   PDF INFO:")
-        print(f"   - File size: {file_size / 1024:.1f} KB")
-        print(f"   - Valid PDF header: {'Yes' if is_valid_pdf else 'No'}")
-
-        if is_valid_pdf:
-            # Try to extract PDF version
-            version = header[5:8].decode('ascii', errors='ignore')
-            print(f"   - PDF version: {version}")
-
-            # Try to count pages (basic method - look for /Page objects)
-            with open(file_path, 'rb') as f:
-                content = f.read()
-                page_count = content.count(b'/Type /Page') - content.count(b'/Type /Pages')
-                if page_count > 0:
-                    print(f"   - Estimated pages: ~{page_count}")
-
-            print("\n" + "=" * 60)
-            print("PDF TEST PASSED!")
-            print("=" * 60)
-        else:
-            print("\nERROR: File does not have valid PDF header")
-            print(f"   Header bytes: {header}")
-
-    except Exception as e:
-        print(f"\nERROR: Failed to read PDF: {e}")
 
 
 # === SECTION: REMOTE_LOADER ===

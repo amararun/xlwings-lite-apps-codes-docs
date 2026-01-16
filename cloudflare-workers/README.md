@@ -1,14 +1,16 @@
 # Cloudflare Workers
 
-This directory contains Cloudflare Worker scripts used by xlwings Lite apps.
+This directory contains the Cloudflare Worker script used by xlwings Lite Data Importer.
 
-## github-proxy-worker.js (Public URLs)
+## github-proxy-auth-worker.js
 
-**Deployed at:** https://github-proxy.tigzig.com
+**Deployed at:** https://github-proxy-auth.tigzig.com
 
-**Purpose:** CORS proxy for browser-based file downloads from public/shareable URLs.
+**Purpose:** Unified multi-cloud CORS proxy supporting shareable links AND token-based private repo access. Used by both Shareable Link Access (2A) and Token Access (2B) modes.
 
-### Supported Services
+### Why a Proxy?
+
+Browser apps (like xlwings Lite running in Pyodide) cannot directly fetch files from certain services due to CORS restrictions:
 
 | Service | Why Proxy Needed |
 |---------|------------------|
@@ -16,31 +18,10 @@ This directory contains Cloudflare Worker scripts used by xlwings Lite apps.
 | Google Drive | No CORS headers on direct downloads |
 | Dropbox | No CORS on shared links |
 
-### Usage
-
-```
-https://github-proxy.tigzig.com/?url=<ENCODED_URL>
-```
-
-### Features
-
-- **Streaming:** No file size limit (streams directly, no buffering)
-- **Security:** Domain whitelist (only GitHub, Google Drive, Dropbox allowed)
-- **CORS:** Adds proper headers for browser compatibility
-- **Pass-through:** No data stored or logged
-
----
-
-## github-proxy-auth-worker.js (Private Repos + Token Access)
-
-**Deployed at:** https://github-proxy-auth.tigzig.com
-
-**Purpose:** Unified multi-cloud proxy supporting both shareable links AND token-based private repo access.
-
 ### Supported Services
 
-| Service | Public | Private (Token) |
-|---------|--------|-----------------|
+| Service | Public URLs | Private (Token) |
+|---------|-------------|-----------------|
 | GitHub Releases | Yes | Yes (PAT) |
 | GitHub Raw Content | Yes | Yes (PAT) |
 | Google Drive | Yes | - |
@@ -59,7 +40,10 @@ Authorization: token ghp_xxxxx
 
 ### Features
 
-- **All features from github-proxy-worker.js**
+- **Streaming:** No file size limit (streams directly, no buffering)
+- **Security:** Domain whitelist (only GitHub, Google Drive, Dropbox allowed)
+- **CORS:** Adds proper headers for browser compatibility
+- **Pass-through:** No data stored or logged
 - **Private GitHub repos:** Forwards PAT for authentication
 - **GitHub API integration:** Uses GitHub API for private release asset downloads
 - **Google Drive (new domains):** Supports new 2024-2025 drive.usercontent.google.com domain
@@ -88,7 +72,7 @@ Authorization: token ghp_xxxxx
 
 ## Deployment
 
-Both workers can be deployed using Cloudflare Workers dashboard or Wrangler CLI.
+Deploy using Cloudflare Workers dashboard or Wrangler CLI.
 
 ### Free Cloudflare Account
 

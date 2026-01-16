@@ -26,7 +26,7 @@ Main script with all data import functionality. Embedded in the xlwings Lite Dat
 - Download any file type as-is
 - PDF, images, ZIP, Excel, or data files
 - No DuckDB conversion
-- Test functions: test_last_image, test_last_pdf, test_last_zip
+- File saved with user-specified filename
 
 ### Sheet Layout
 
@@ -68,6 +68,3 @@ Main script with all data import functionality. Embedded in the xlwings Lite Dat
 | import_raw_sharelink | Raw file download via URL |
 | import_raw_token | Raw file download via OAuth/PAT |
 | run_stats | Auto-detect and run statistics |
-| test_last_image | Verify last imported image |
-| test_last_pdf | Verify last imported PDF |
-| test_last_zip | Verify last imported ZIP |
