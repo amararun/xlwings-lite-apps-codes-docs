@@ -106,3 +106,10 @@ When working with these apps, the Excel file is the primary source. The `.py` fi
 ## Credits
 
 Built with [xlwings Lite](https://lite.xlwings.org), created by [Felix Zumstein](https://www.linkedin.com/in/felix-zumstein/) - a powerful solution for integrating Python with Excel, enabling native support for databases, AI agents, LLMs, advanced analytics, machine learning, APIs, web services, and complete automation workflows.
+
+
+## Author
+
+Built by [Amar Harolikar](https://www.linkedin.com/in/amarharolikar/)
+
+Explore 30+ open source AI tools for analytics, databases & automation at [tigzig.com](https://tigzig.com)
