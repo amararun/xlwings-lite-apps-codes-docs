@@ -1,6 +1,6 @@
 # xlwings Lite: Coding Guidelines for AI Coders (Humans Welcome)
 
-**Version 3.0 · 20 October 2026.** The latest copy is always at https://www.tigzig.com/files/xlwings/AI_CODER_INSTRUCTIONS.md. If your copy shows a lower version number, download the latest. Changes are listed under Version History at the end.
+**Version 3.1 · 20 October 2026.** The latest copy is always at https://www.tigzig.com/files/xlwings/AI_CODER_INSTRUCTIONS.md. If your copy shows a lower version number, download the latest. Changes are listed under Version History at the end.
 
 **Tested on:** xlwings Lite add-in build 1.0.0.104, xlwings 0.37.7, Pyodide 314.0.1 (Python 3.14.2, pandas 3.0.2, numpy 2.4.3), Excel desktop on Windows. Every platform behaviour marked **[tested]** was run in real Excel on that build. Items marked **[docs]** come from the official documentation and were not re-run here.
 
@@ -11,18 +11,18 @@
 ## 0. THE RULES (check every script against these)
 
 1. **Write DataFrames with `.options(index=False)`.** `sheet["A1"].value = df` writes the pandas index as an extra first column. [tested]
-2. **Re-runnable sheets: delete, then add, with a loop.** `"Name" in book.sheets` is ALWAYS `False`, even for a sheet that exists. Check names with `[s.name for s in book.sheets]` or loop over the sheets. [tested]
+2. **Re-runnable sheets: delete, then add, with a loop.** `"Name" in book.sheets` returns `False` even for a sheet that exists. Check names with `[s.name for s in book.sheets]` or loop over the sheets. [tested]
 3. **Size new ranges with `.resize()`, never `.expand()`.** Reads come from a snapshot taken when the script started, so `.expand()` and `used_range` cannot see data written in the same run. [tested]
 4. **Find tables by name across sheets** with the `find_table_in_workbook()` helper (section 5.2). `table.sheet` raises `AttributeError`; use `table.parent` if you have the table already. [tested]
 5. **Table names are unique across the whole workbook.** If a user renamed an old output sheet, its table keeps its name, and the next run's `tables.add(name=...)` fails with a generic `InvalidArgument`. Omit `name=` unless the user asked for one, and when you do name a table, remove any existing table of that name first (section 5.3). [tested]
 6. **Excel-side errors surface at flush, not at the call.** A `try/except` around `sheet.tables.add()` catches nothing unless you `await book.flush()` inside the `try`. That needs an `async def` script (section 3). [tested]
 7. **Keep text as text.** A date-like string (`"2026-01-02"`) becomes a date and `"00123"` becomes `123`. Set `number_format = "@"` on the target range BEFORE writing (section 4.3). [tested]
 8. **`np.inf` writes as a blank cell, silently.** NaN, None and `pd.NA` also write as blank. Replace infinities before writing if they matter. [tested]
-9. **Write formulas through `.value`:** `rng.value = "=A2+A3"`. The `.formula` setter is not implemented. [tested]
-10. **Formatting you can set:** `.color`, `.font.bold/italic/color/size/name`, `.number_format`, `Range.autofit()`. **You cannot:** `Sheet.autofit()`, `column_width`, `row_height`, `merge()`, `wrap_text`. **You cannot READ** any format (color, number format, font, formula, column width). [tested]
+9. **Write formulas through `.value`:** `rng.value = "=A2+A3"`. The `.formula` setter isn't available yet on this build. [tested]
+10. **Formatting you can set:** `.color`, `.font.bold/italic/color/size/name`, `.number_format`, `Range.autofit()`. **Not available yet:** `Sheet.autofit()`, `column_width`, `row_height`, `merge()`, `wrap_text`, and reading back any format (color, number format, font, formula, column width). [tested]
 11. **Mark every user-runnable function with `@script`**, with `book: xw.Book` as its first argument. [docs]
 12. **pandas 3 is the default for new workbooks** (pandas 2 still runs on older ones). Write code that works on both: no chained `inplace=True`, no `errors="ignore"` (section 11). [tested]
-13. **Custom functions (`@func`): take cell inputs as `typing.Any` and convert inside**, because blank cells arrive as `0` and text in a numeric hint fails before your code runs (section 8.2). [docs]
+13. **Custom functions (`@func`): take cell inputs as `typing.Any` and convert inside.** A numeric type hint doesn't convert the value: text arrives as text, so `x * 2` on `"abc"` returns `"abcabc"` with no error. Blank and error cells arrive as `None`, dates as serial numbers (section 8.2). [tested]
 14. **Activate the final output sheet** with `sheet.activate()` so the user sees the result. When the script runs from a sheet button, the add-in jumps back to the button's sheet afterwards (section 3.4). [tested]
 15. **Print progress** at each major step. `print()` output appears in the Output pane when the script ends, or right away after `await book.flush()`. [tested]
 
@@ -174,7 +174,7 @@ rng.options(transpose=True).value = df["ACCOUNT_ID"].tolist()
 ### 4.4 Formulas
 ```python
 sheet["C2"].value = "=A2*B2"     # works
-# sheet["C2"].formula = "=A2*B2"  # NOT implemented (fails at flush)
+# sheet["C2"].formula = "=A2*B2"  # not available yet (raises an error at flush)
 ```
 
 ---
@@ -189,7 +189,7 @@ def fresh_sheet(book, name):
             s.delete()
     return book.sheets.add(name)
 
-# WRONG: always False, even when the sheet exists
+# Avoid: this returns False even when the sheet exists
 # if "Results" in book.sheets: ...
 ```
 
@@ -238,9 +238,9 @@ header.font.bold = True
 sheet["B2"].resize(len(df), 1).number_format = "#,##0.00"
 sheet["A1"].resize(df.shape[0] + 1, df.shape[1]).autofit()   # Range.autofit works [tested]
 ```
-Not available on the tested build (they fail at flush with `JsException: TypeError: globalThis.callbacks[action.func] is not a function`): `Sheet.autofit()`, `column_width =`, `row_height =`, `merge()`, `unmerge()`, `wrap_text =`, `.formula =`, `autofill()`, `Sheet.copy()`, `Book.save()`, `app.screen_updating`. [tested]
+Not available yet on the tested build (each raises `JsException: TypeError: globalThis.callbacks[action.func] is not a function` at flush): `Sheet.autofit()`, `column_width =`, `row_height =`, `merge()`, `unmerge()`, `wrap_text =`, `.formula =`, `autofill()`, `Sheet.copy()`, `Book.save()`, `app.screen_updating`. [tested]
 
-Reading formats is not available: `.color`, `.number_format`, `.font.*`, `.formula`, `.column_width`, `.current_region`, `.table` raise `NotImplementedError` suggesting async getters (`await rng.get_color()` etc.), but those raise `AttributeError: getRangeData` on the tested build. Track formatting state in Python instead of reading it back. [tested]
+Reading formats back isn't available yet: `.color`, `.number_format`, `.font.*`, `.formula`, `.column_width`, `.current_region` and `.table` raise `NotImplementedError` pointing to async getters (`await rng.get_color()` etc.). On the tested build those getters aren't wired up yet (`AttributeError: getRangeData`), so keep track of formatting state in Python. [tested]
 
 Presentation conventions: clean column names (`df.rename(columns=...)`) before writing; formal Excel tables for summaries; a fill always paired with a readable font colour.
 
@@ -260,7 +260,7 @@ plt.close(fig)
 ```
 - `update=True` with a fixed `name` replaces the picture on re-run. [tested]
 - `Range.to_png("/data/range.png")` works; call `await book.flush()` before reading the file in the same script. [tested]
-- Native Excel charts can't be created (`Charts.add()` is missing). [docs]
+- Creating native Excel charts (`Charts.add()`) isn't covered yet; use pictures. [docs]
 - Custom functions can return a Matplotlib figure (xlwings >= 0.36.8). [docs]
 
 ---
@@ -288,10 +288,19 @@ def myfunction(df: pd.DataFrame) -> pd.DataFrame:   # type hints work instead of
 ```
 Also available: `*args`, docstrings and `@arg(doc=...)` for Excel IntelliSense, `typing.Literal` parameters (dropdown while typing), `@func(name="MyName")`, namespaces (`__xlwings_func_namespace__`), dynamic arrays, volatile functions, object handles, streaming functions, `xw.Caller` (calling cell, xlwings >= 0.36.17), `xw.WithScript()` to run a script after the function returns (xlwings >= 0.36.17). See the Custom Functions page of the docs.
 
-### 8.2 Inputs: blanks, text and the `Any` pattern [docs]
-- Empty cells arrive as `0` (not `None`). To get `None`, the cell must contain `=""`.
-- Integers arrive as `int`. Date cells need `dt.datetime` or `parse_dates`.
-- With a specific hint like `float`, a cell holding text fails conversion before your code runs, and the cell shows `#VALUE!` (hover the cell's warning icon for the message).
+### 8.2 Inputs: what your function actually receives [tested]
+| Cell content | Value received |
+|---|---|
+| Number | `int` or `float` |
+| Text, including numeric text like `'7` | `str`, unchanged |
+| Blank cell, `=""`, or an error cell such as `#N/A` | `None` |
+| `TRUE` / `FALSE` | `bool` |
+| Date | serial number (`int`), unless the argument is hinted `dt.datetime` |
+| A range, hinted `list` | nested list, blanks as `None` |
+
+- A `float` type hint, or `@arg("x", float)`, doesn't convert scalars. `x * 2` on the text `"abc"` returns `"abcabc"` and `"7"` gives `"77"`: a wrong answer with no error. A blank becomes `None`, so arithmetic raises and the cell shows `#VALUE!` (hover the cell's warning icon for the message).
+- A `dt.datetime` hint does convert date cells to `datetime`.
+- The docs table says empty cells arrive as `0`; on the tested build they arrived as `None`. Handle both.
 - Robust pattern: accept `Any` and convert inside.
 ```python
 from typing import Any
@@ -310,8 +319,9 @@ def double_it(value: Any):
 ```
 
 ### 8.3 Outputs [docs]
-- `np.nan` / `pd.NA` returned from a function show as `#NUM!` (scripts write them as blank).
-- Return `"#N/A"`, `"#VALUE!"` etc. to produce real error cells.
+- `np.nan` / `pd.NA` returned from a function show as `#NUM!` (scripts write them as blank). [tested]
+- `math.inf` returned from a function shows as `0`, with no error. Return `"#NUM!"` or `None` instead if infinity is possible. [tested]
+- Return `"#N/A"`, `"#VALUE!"` etc. to produce real error cells. [tested]
 - Functions are asynchronous: the cell shows `#BUSY!` while calculating.
 
 ### 8.4 Debugging `#VALUE!`
@@ -424,7 +434,7 @@ These are our standing conventions for analysis scripts. They are style and corr
 df["X"] = pd.to_numeric(df["X"], errors="coerce")
 if df["X"].isna().any():
     df["X"] = df["X"].fillna(df["X"].median())
-# WRONG: pd.to_numeric(df["X"], errors="coerce").fillna(df["X"].median())
+# Avoid: pd.to_numeric(df["X"], errors="coerce").fillna(df["X"].median())
 #        -> the median is taken from the ORIGINAL, unconverted column
 ```
 5. **Balanced samples (test/control):** `sklearn.model_selection.train_test_split(..., stratify=...)`.
@@ -439,10 +449,10 @@ if df["X"].isna().any():
 |---|---|---|
 | `JsException: InvalidArgument: The argument is invalid or missing...` at the end of a run | Duplicate table name (often from a renamed output sheet), or an invalid value in a write | `drop_table_everywhere()` before naming; omit `name=`; flush after each step to locate it |
 | `InvalidArgument: A table can't overlap another table` | New table over an existing one | Delete the old sheet/table first |
-| `JsException: TypeError: globalThis.callbacks[action.func] is not a function` | The operation isn't implemented in Lite (e.g. `column_width`, `merge`, `.formula =`) | Remove it (section 6) |
+| `JsException: TypeError: globalThis.callbacks[action.func] is not a function` | The operation isn't available yet in Lite (e.g. `column_width`, `merge`, `.formula =`) | Leave it out (section 6) |
 | `NotImplementedError: Reading ... synchronously isn't supported` | Reading a format/formula/width | Track the state in Python |
 | `AttributeError: 'Table' object has no attribute 'sheet'` | `table.sheet` | `find_table_in_workbook()` or `table.parent` |
-| A sheet "doesn't exist" check never fires | `"Name" in book.sheets` is always False | Loop over sheet names |
+| A sheet "doesn't exist" check never fires | `"Name" in book.sheets` returns False | Loop over sheet names |
 | Data written this run reads back empty / `.expand()` returns one cell | Snapshot taken at script start | `.resize()`; or `await book.flush()` then `await rng.get_value()` / `await sheet.load()` |
 | Nothing appears in Excel until the script ends | Writes are queued | `await book.flush()` (async script) |
 | `try/except` didn't catch an Excel error | Error raised at flush, after the `try` | Flush inside the `try` |
@@ -451,7 +461,8 @@ if df["X"].isna().any():
 | Leading zeros / IDs / codes changed in Excel | Auto-conversion of strings | `number_format = "@"` before writing |
 | `ModuleNotFoundError` | Package not in `requirements.txt` | Add it and restart |
 | CORS error on a request | Server doesn't allow `https://addin.xlwings.org` | Add the header, or use your own CORS proxy |
-| Custom function shows `#VALUE!` | Type conversion failed, or the module has an error | Section 8.4 |
+| Custom function shows `#VALUE!` | A `None` (blank cell) reached arithmetic, or the module has an error | Section 8.2 and 8.4 |
+| Custom function returns a strange repeated string like `abcabc` | Text was multiplied: type hints don't convert | Section 8.2 |
 
 ---
 
@@ -503,5 +514,6 @@ async def summarise_portfolio(book: xw.Book):
 
 ## Version History
 
+- **3.1 (20 October 2026):** Custom functions re-tested in real Excel: what inputs arrive as (text stays text, blanks and error cells arrive as `None`), numeric hints don't convert, `inf` returns as `0`. Gentler wording throughout.
 - **3.0 (20 October 2026):** Rewritten and re-tested in real Excel against add-in build 1.0.0.104, xlwings 0.37.7 and pandas 3. Corrects several version 2 rules that no longer hold (RGB colours, mixed-type columns, 2D list writes, named tables in loops, single-argument scripts) and adds the snapshot/flush model, pandas 3 notes, text auto-conversion and the current API support table.
 - **2.x (November 2025):** Compressed edition of the original guide.
