@@ -1,6 +1,6 @@
 # xlwings Lite: Coding Guidelines for AI Coders (Humans Welcome)
 
-**Version 3.1 · 20 October 2026.** The latest copy is always at https://www.tigzig.com/files/xlwings/AI_CODER_INSTRUCTIONS.md. If your copy shows a lower version number, download the latest. Changes are listed under Version History at the end.
+**Version 3.2 · 20 October 2026.** The latest copy is always at https://www.tigzig.com/files/xlwings/AI_CODER_INSTRUCTIONS.md. If your copy shows a lower version number, download the latest. Changes are listed under Version History at the end.
 
 **Tested on:** xlwings Lite add-in build 1.0.0.104, xlwings 0.37.7, Pyodide 314.0.1 (Python 3.14.2, pandas 3.0.2, numpy 2.4.3), Excel desktop on Windows. Every platform behaviour marked **[tested]** was run in real Excel on that build. Items marked **[docs]** come from the official documentation and were not re-run here.
 
@@ -422,9 +422,9 @@ No TCP sockets, so no direct PostgreSQL/MySQL connections. Options: a web API in
 
 ---
 
-## 14. Analysis Conventions (house style)
+## 14. Recommended Conventions for Analysis Scripts
 
-These are our standing conventions for analysis scripts. They are style and correctness rules, not platform limits.
+These come from building analysis tools in xlwings Lite. They are style and correctness rules, not platform limits.
 
 1. **Separate calculation from Excel I/O.** Calculation functions take and return DataFrames, with no `xw` objects. One final block writes everything. A failure in the maths then never leaves the workbook half-written, and errors are easy to place.
 2. **Pivoted report tables: build from a list of dicts.** `.unstack()`/pivot fails or drops columns when a group is missing. Loop over variables and groups, `report_rows.append({...})`, then `pd.DataFrame(report_rows)`. A plain `groupby().agg().reset_index()` is fine when nothing is reshaped.
@@ -512,8 +512,123 @@ async def summarise_portfolio(book: xw.Book):
 
 ---
 
+## 17. For AI Coding Agents: Run and Test Code in Real Excel Yourself
+
+If you are an AI coding agent working on the user's Windows machine (Claude Code, Cursor, Antigravity, Codex or similar), you can run your xlwings Lite code inside the user's Excel and read the output and traceback back yourself. The user stops copying code in and errors out. Everything in this file marked [tested] was verified this way.
+
+**Requirements:** Excel desktop on Windows (mounted Local Folders are Windows-only), Python on the same machine with `pywin32` (`pip install pywin32`), and about 10 minutes of one-time setup by the user.
+
+### 17.1 How it works
+1. A dedicated folder on disk (the "lab folder") is mounted in xlwings Lite at `/xlw_lab`.
+2. The workbook's `main.py` holds a small runner script, pasted once. It executes `/xlw_lab/task.py`, captures stdout and the traceback, and writes `/xlw_lab/result.json`.
+3. The runner is bound to a sheet button. A sheet button fires when its linked cell is selected, so your trigger script selects that cell over COM. No click is needed.
+4. You write `task.py`, trigger, and read `result.json`. To check what landed in Excel independently of xlwings, read cells over COM.
+
+### 17.2 One-time setup (the user does this)
+1. Create the lab folder, e.g. `C:\xlw_lab`, containing only lab files. Code run from the workbook can read and write everything in it.
+2. Create `lab.xlsx` with a sheet named `Runner`. Insert a shape over cell `B4`, name it `run_btn` in the Name Box, and link it (right-click > Link > Place in This Document) to `Runner!B4`.
+3. Open xlwings Lite in that workbook. Replace all of `main.py` with the runner in 17.3.
+4. Menu > Files > Local Folders > Add Folder > the lab folder. Accept both prompts with "Allow on every visit". Set the mount path to `/xlw_lab` with the pencil icon. Paths are case-sensitive.
+5. Settings > Workbook > autostart on. Save the workbook and keep it open while the agent works.
+
+### 17.3 The runner (`main.py`)
+```python
+import ast, contextlib, datetime, inspect, io, json, sys, traceback
+import xlwings as xw
+from xlwings import script
+
+LAB = "/xlw_lab"
+
+
+def _purge_lab_modules():
+    # Re-import helper modules from the lab folder fresh on every run.
+    for name, mod in list(sys.modules.items()):
+        if (getattr(mod, "__file__", None) or "").startswith(LAB):
+            del sys.modules[name]
+
+
+@script(button="[run_btn]Runner!B4")
+async def run_task(book: xw.Book):
+    try:
+        run_id = open(f"{LAB}/run_id.txt", encoding="utf-8").read().strip()
+    except Exception:
+        run_id = "none"
+    out, status, tb = io.StringIO(), "OK", ""
+    if LAB not in sys.path:
+        sys.path.insert(0, LAB)
+    _purge_lab_modules()
+    try:
+        src = open(f"{LAB}/task.py", encoding="utf-8").read()
+        code = compile(src, "task.py", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            res = eval(code, {"book": book, "xw": xw, "__name__": "__task__"})
+            if inspect.iscoroutine(res):
+                await res
+            await book.flush()  # surface Excel-side errors inside the try
+    except BaseException:
+        status, tb = "ERROR", traceback.format_exc()
+    result = {"run_id": run_id, "status": status, "xlwings": xw.__version__,
+              "python": sys.version.split()[0], "stdout": out.getvalue(), "traceback": tb,
+              "ended": datetime.datetime.now().isoformat(timespec="seconds")}
+    with open(f"{LAB}/result.json", "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2)
+    book.sheets["Runner"]["B2"].value = f"{run_id}  {status}  {result['ended']}"
+```
+`task.py` gets `book` and `xw` and may use top-level `await` (e.g. `await book.flush()`).
+
+### 17.4 The trigger (runs on the machine, outside Excel)
+```python
+# run_task.py  -  usage: python run_task.py path/to/task.py
+import json, secrets, shutil, sys, time
+from pathlib import Path
+import win32com.client
+
+LAB = Path(r"C:\xlw_lab")
+WORKBOOK = "lab.xlsx"
+
+shutil.copyfile(sys.argv[1], LAB / "task.py")
+run_id = time.strftime("%H%M%S") + "-" + secrets.token_hex(3)
+(LAB / "run_id.txt").write_text(run_id, encoding="utf-8")
+
+xl = win32com.client.GetActiveObject("Excel.Application")
+wb = next(b for b in xl.Workbooks if b.Name.lower() == WORKBOOK)
+wb.Activate()
+ws = wb.Worksheets("Runner")
+ws.Activate()
+ws.Range("B6").Select()   # make sure B4 isn't already selected
+ws.Range("B4").Select()   # fires the button handler
+
+t0 = time.time()
+while time.time() - t0 < 180:
+    try:
+        res = json.loads((LAB / "result.json").read_text(encoding="utf-8"))
+    except Exception:
+        res = None
+    if res and res.get("run_id") == run_id:
+        print(res["status"], res["stdout"], res["traceback"], sep="\n")
+        sys.exit(0 if res["status"] == "OK" else 1)
+    time.sleep(0.5)
+sys.exit("timeout: is the workbook open with xlwings Lite running?")
+```
+The run id makes sure you never read a stale result. A run usually returns in 1 to 3 seconds.
+
+### 17.5 Testing custom functions
+1. The user also mounts a folder as `/personal` (17.2 step 4). Put the functions under test in `personal/projects/<name>/`, where `<name>` is part of the workbook's filename (`lab` for `lab.xlsx`), so they load only into that workbook.
+2. After changing function code, restart the add-in from a task: `import js; js.window.location.reload()`. Wait about 20 seconds; the runner and the new functions are then live.
+3. Write formulas and read results over COM: `ws.Range("C2").Formula = "=MY_FUNC(B2)"`, wait while `.Text` shows `#BUSY!`, then read `.Text`.
+
+### 17.6 Notes
+- Keep the lab workbook open. Opening it again over COM doesn't autostart the add-in, and runs then time out until the user opens xlwings Lite by hand.
+- The trigger brings the workbook to the front, so it takes focus from the user while it runs.
+- Packages not in `requirements.txt` can be tried from a task with `import micropip; await micropip.install("name")`. Put them in `requirements.txt` for the finished tool.
+- The lab is for building and testing. The finished tool's code goes into its own workbook's `main.py`.
+- Reading cells over COM gives a ground truth that doesn't depend on xlwings' start-of-run snapshot (section 3).
+
+---
+
 ## Version History
 
-- **3.1 (20 October 2026):** Custom functions re-tested in real Excel: what inputs arrive as (text stays text, blanks and error cells arrive as `None`), numeric hints don't convert, `inf` returns as `0`. Gentler wording throughout.
+- **3.2 (20 October 2026):** New section 17: how an AI coding agent can run and test xlwings Lite code in the user's Excel by itself (Windows desktop).
+- **3.1 (20 October 2026):** Custom functions re-tested in real Excel: what inputs arrive as (text stays text, blanks and error cells arrive as `None`), numeric hints don't convert, `inf` returns as `0`.
 - **3.0 (20 October 2026):** Rewritten and re-tested in real Excel against add-in build 1.0.0.104, xlwings 0.37.7 and pandas 3. Corrects several version 2 rules that no longer hold (RGB colours, mixed-type columns, 2D list writes, named tables in loops, single-argument scripts) and adds the snapshot/flush model, pandas 3 notes, text auto-conversion and the current API support table.
 - **2.x (November 2025):** Compressed edition of the original guide.
