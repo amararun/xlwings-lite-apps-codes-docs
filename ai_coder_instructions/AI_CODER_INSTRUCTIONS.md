@@ -2,7 +2,7 @@
 
 **Version 3.3 · 22 October 2026.** The latest copy is always at https://www.tigzig.com/files/xlwings/AI_CODER_INSTRUCTIONS.md. If your copy shows a lower version number, download the latest. Changes are listed under Version History at the end.
 
-**Tested on:** xlwings Lite add-in build 1.0.0.104, xlwings 0.37.7, Pyodide 314.0.1 (Python 3.14.2, pandas 3.0.2, numpy 2.4.3), Excel desktop on Windows. Every platform behaviour marked **[tested]** was run in real Excel on that build. Items marked **[docs]** come from the official documentation and were not re-run here.
+**Tested on:** xlwings Lite add-in build 1.0.0.104 (the Python package inside it: xlwings 0.37.7), Pyodide 314.0.1 (Python 3.14.2, pandas 3.0.2, numpy 2.4.3), Excel desktop on Windows. Every platform behaviour marked **[tested]** was run in Excel on that build. Items marked **[docs]** come from the official documentation and were not re-run here.
 
 **Official docs:** https://lite.xlwings.org (machine-readable: https://lite.xlwings.org/llms-full.txt). If something here disagrees with a newer build, trust the build and the docs.
 
@@ -561,7 +561,7 @@ async def summarise_portfolio(book: xw.Book):
 
 ---
 
-## 17. For AI Coding Agents: Run and Test Code in Real Excel Yourself
+## 17. For AI Coding Agents: Run and Test Code in Excel Yourself
 
 If you are an AI coding agent working on the user's Windows machine (Claude Code, Cursor, Antigravity, Codex or similar), you can run your xlwings Lite code inside the user's Excel and read the output and traceback back yourself. The user stops copying code in and errors out. Everything in this file marked [tested] was verified this way.
 
@@ -680,5 +680,5 @@ The run id makes sure you never read a stale result. A run usually returns in 1 
 - **3.3 (22 October 2026):** Databases (DuckDB, Parquet, SQLite), API keys in environment variables, web requests with retries, and conventions for batch tools, sheet buttons and status messages.
 - **3.2 (20 October 2026):** How an AI coding agent can run and test code in the user's Excel by itself.
 - **3.1 (20 October 2026):** Custom functions re-tested: how cell inputs arrive.
-- **3.0 (20 October 2026):** Full rewrite, re-tested in real Excel on the current build with pandas 3.
+- **3.0 (20 October 2026):** Full rewrite, re-tested in Excel on the current xlwings Lite build with pandas 3.
 - **2.x (November 2025):** Compressed edition of the original guide.
