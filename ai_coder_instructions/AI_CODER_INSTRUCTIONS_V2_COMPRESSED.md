@@ -1,6 +1,6 @@
 # xlwings Lite: Coding Guidelines for AI Coders (Humans Welcome)
 
-**Version 3.2 · 20 October 2026.** The latest copy is always at https://www.tigzig.com/files/xlwings/AI_CODER_INSTRUCTIONS.md. If your copy shows a lower version number, download the latest. Changes are listed under Version History at the end.
+**Version 3.3 · 22 October 2026.** The latest copy is always at https://www.tigzig.com/files/xlwings/AI_CODER_INSTRUCTIONS.md. If your copy shows a lower version number, download the latest. Changes are listed under Version History at the end.
 
 **Tested on:** xlwings Lite add-in build 1.0.0.104, xlwings 0.37.7, Pyodide 314.0.1 (Python 3.14.2, pandas 3.0.2, numpy 2.4.3), Excel desktop on Windows. Every platform behaviour marked **[tested]** was run in real Excel on that build. Items marked **[docs]** come from the official documentation and were not re-run here.
 
@@ -25,6 +25,7 @@
 13. **Custom functions (`@func`): take cell inputs as `typing.Any` and convert inside.** A numeric type hint doesn't convert the value: text arrives as text, so `x * 2` on `"abc"` returns `"abcabc"` with no error. Blank and error cells arrive as `None`, dates as serial numbers (section 8.2). [tested]
 14. **Activate the final output sheet** with `sheet.activate()` so the user sees the result. When the script runs from a sheet button, the add-in jumps back to the button's sheet afterwards (section 3.4). [tested]
 15. **Print progress** at each major step. `print()` output appears in the Output pane when the script ends, or right away after `await book.flush()`. [tested]
+16. **API keys come from environment variables, never from cells or code:** `os.getenv("GEMINI_API_KEY")`, set by the user in Local scope (section 13). A key in a cell or in `main.py` travels with every copy of the file.
 
 ---
 
@@ -162,6 +163,7 @@ Still good practice, for pandas reasons: use `None` (not `""`) for missing numbe
 | `"2026-01-02"` (string) | **converted to a date** |
 | `"00123"` (string) | **converted to 123** |
 | `"=A1+A2"` (string) | formula |
+| `bytes` / `bytearray` | **error at flush:** `GeneralException: ... has a property "0" which isn't recognized`. Decode to `str` first |
 
 ### 4.3 Keeping text as text [tested]
 ```python
@@ -339,6 +341,7 @@ def debug_input(cell: Any) -> str:
 
 - `/data` is the working directory. Relative paths read and write there. Files appear under Menu > Files > Import/Export, where users can also upload files (drag and drop). They are deleted when the Office cache is cleared.
 - **Local Folders** (Excel desktop on Windows only): the user mounts a folder from their computer at a path such as `/my_data`; code reads and writes real files there. Paths are case-sensitive: the default mount path is the folder name as typed, e.g. `/My_Data`, not `/my_data`. [tested]
+- **Writing to a mounted folder:** files your script writes there reach the disk when the script finishes, not while it runs. A file that another program creates in the mounted folder while a script is running is removed when the script finishes; files that were there before, and edits to them, are kept. Avoid dropping files into a mounted folder mid-run. [tested]
 - `/src` holds the workbook's source files (text only). Read one with `(Path(__file__).parent / "config.json").read_text()`.
 - **Personal modules:** a folder mounted (or uploaded) as `/personal` loads its scripts and functions into every workbook, like `Personal.xlsb`; `personal/projects/<name>/` loads only for workbooks whose filename contains `<name>`. Restart the add-in after changes.
 
@@ -385,18 +388,30 @@ def to_numeric_where_possible(df):
 Requests run from the user's browser, origin `https://addin.xlwings.org` (or the self-hosted domain). The server must send `Access-Control-Allow-Origin` for that origin. GitHub raw files work. If you don't control the server, use a CORS proxy you own. For IP allow-lists, allow the user's IP (requests don't go through xlwings servers).
 
 ### 12.2 Making requests [tested]
+`pyfetch` is built in (no install) and async. A helper that retries busy or temporary errors, which LLM APIs return often on free tiers:
 ```python
-from pyodide.http import pyfetch          # built in, no install needed
+import asyncio, json, os
+from pyodide.http import pyfetch
 
-@script
-async def fetch_data(book: xw.Book):
-    r = await pyfetch("https://api.example.com/data", headers={"Accept": "application/json"})
-    if not r.ok:
-        raise RuntimeError(f"API error {r.status}")
-    data = await r.json()                 # or: await r.text()
+async def post_json(url: str, payload: dict, headers: dict, tries: int = 3) -> dict:
+    for attempt in range(1, tries + 1):
+        r = await pyfetch(url, method="POST", body=json.dumps(payload),
+                          headers={"Content-Type": "application/json", **headers})
+        text = await r.text()
+        if r.ok:
+            return json.loads(text)
+        if r.status not in (429, 500, 502, 503, 504) or attempt == tries:
+            raise RuntimeError(f"HTTP {r.status}: {text[:300]}")
+        await asyncio.sleep(3 * attempt)
+    raise RuntimeError("unreachable")
+
+# GET: r = await pyfetch(url); data = await r.json()
+# Key from an environment variable: headers={"x-goog-api-key": os.getenv("GEMINI_API_KEY")}
 ```
-`requests` (sync) and `httpx` (async) also work once installed. `pd.read_csv("https://raw.githubusercontent.com/...")` works for CORS-enabled URLs. [docs]
-Secrets go in environment variables (section 13), never in code.
+- Send keys in a header, not in the URL.
+- **LLM model names get retired.** Where the provider offers an alias (for example `gemini-flash-latest`), use it as the default and let the user change it in a cell.
+- **Structured output:** ask for JSON with a schema (Gemini `response_schema`, OpenAI-style `response_format: json_schema`). Check returned field names against your real columns before using them.
+- `requests` (sync) and `httpx` (async) also work once installed; prefer async calls for long or many requests, so `await book.flush()` can show progress between them. `pd.read_csv("https://raw.githubusercontent.com/...")` works for CORS-enabled URLs. [docs]
 
 Parsing a pipe-delimited text response (pandas 2 and 3):
 ```python
@@ -409,16 +424,43 @@ def parse_pipe_delimited(text: str) -> pd.DataFrame:
     return to_numeric_where_possible(pd.DataFrame(rows, columns=headers))
 ```
 
-### 12.3 Databases [docs]
-No TCP sockets, so no direct PostgreSQL/MySQL connections. Options: a web API in front of the database (FastAPI, PostgREST, Supabase, Oracle ORDS, MySQL REST Service, NocoDB), or download a SQLite file and query it with `sqlite3`.
+### 12.3 Databases: DuckDB, SQLite and Parquet
+There are no TCP sockets in the browser, so there are no direct PostgreSQL or MySQL connections. For a server database, put a web API in front of it (FastAPI, PostgREST, Supabase, Oracle ORDS, MySQL REST Service, NocoDB). [docs]
+
+Data you can download runs locally, inside the browser: [tested]
+- **DuckDB** works: add `duckdb` to `requirements.txt`. SQL on pandas DataFrames, reading and writing Parquet, and a persistent `.duckdb` database file under `/data` all work.
+- **Remote files:** download first with `pyfetch`, save under `/data`, then query. DuckDB can't read an `https://` URL directly here, because its `httpfs` extension can't be installed in the browser.
+- **Files on hosts without CORS headers** (for example GitHub release assets) need a CORS proxy you own (section 12.1).
+- **Parquet:** read it with DuckDB. `pandas.read_parquet` needs `pyarrow`, which isn't installed by default; in our test it installed but couldn't read the sample file, while DuckDB read it fine.
+- **SQLite:** Python's built-in `sqlite3` works on a downloaded `.db` file. [docs]
+
+```python
+import duckdb
+from pyodide.http import pyfetch
+
+@script
+async def load_parquet(book: xw.Book):
+    r = await pyfetch("https://example.com/sales.parquet")    # server must allow CORS
+    if not r.ok:
+        raise RuntimeError(f"Download failed: {r.status}")
+    with open("/data/sales.parquet", "wb") as f:
+        f.write(await r.bytes())
+    con = duckdb.connect("/data/analysis.duckdb")             # or duckdb.connect() for in-memory
+    df = con.execute(
+        "select region, sum(amount) as total from read_parquet('/data/sales.parquet') group by region"
+    ).df()
+    book.sheets[0]["A1"].options(index=False).value = df
+```
+Text stored as binary in a Parquet file arrives as `bytes`; decode it before writing (section 4.2).
 
 ---
 
 ## 13. Environment Variables and Security [docs]
 
 - Two scopes: **Local** (browser storage, all workbooks, deleted with the Office cache, back it up) and **Workbook** (saved inside the file; not for secrets). Local overrides Workbook. Restart the add-in after setting one.
-- Read with `os.getenv("OPENAI_API_KEY")` and raise a clear error if missing.
+- Read with `os.getenv("OPENAI_API_KEY")` and raise a clear error if missing. Tell the user exactly where to set it: Settings > Environment Variables, the variable name, scope Local, then restart the add-in.
 - Local-scope secrets are readable by any workbook the user trusts, so only trust workbooks from known sources.
+- Never put a key in a cell, in code or in Workbook scope, not even as a "sample key". Before sharing a workbook, search its sheets and code for anything key-like.
 
 ---
 
@@ -439,7 +481,13 @@ if df["X"].isna().any():
 ```
 5. **Balanced samples (test/control):** `sklearn.model_selection.train_test_split(..., stratify=...)`.
 6. **Narrate** progress with `print()` and finish with a clear success line.
-7. **Activate** the last output sheet (see rule 14 for the button caveat).
+7. **Keep the editor's Problems pane clean.** xlwings Lite checks code with the Ty type checker, and a published workbook full of red squiggles looks broken even when it runs. The common fixes: an optional argument is `name: Optional[str] = None` (not `name: str = None`); a list of dicts with mixed values is typed `list[dict[str, Any]]`; pass a tuple where a library expects one (`plt.tight_layout(rect=(0, 0, 1, 0.9))`); convert values read from a config dict before passing them on (`int(config['bins'])`). [tested]
+8. **Activate** the last output sheet (see rule 14 for the button caveat).
+9. **Number scripts in run order:** `@script(name="1. Import Data")`, `@script(name="2. Build Summary")`. The Run dropdown and sheet buttons then read as steps.
+10. **Show the outcome on the sheet**, in a status cell next to the buttons (errors in red, success in blue), as well as in the Output pane. Many users never open the pane.
+11. **Batch tools that call an API per row:** write each result as it finishes and `await book.flush()`, keep a status column (DONE / ERROR) so a re-run skips finished rows and keeps their results, and on a rate-limit or quota error stop cleanly and leave the remaining rows pending.
+12. **Sample data:** ship it in a table on a hidden sheet and copy it into the input sheet with a "Use Sample Data" script. Tables on hidden sheets read normally. [tested]
+13. **A HOW_IT_WORKS sheet** as the first sheet (steps, what each sheet holds, limits) helps both the user and the AI the user pastes it into.
 
 ---
 
@@ -459,6 +507,7 @@ if df["X"].isna().any():
 | `ValueError: invalid error value specified` | pandas 3 removed `errors="ignore"` | Section 11 |
 | A `fillna(..., inplace=True)` had no effect | pandas 3 Copy-on-Write | Assign the result back |
 | Leading zeros / IDs / codes changed in Excel | Auto-conversion of strings | `number_format = "@"` before writing |
+| `GeneralException: Cell X has a property "0" which isn't recognized` | A `bytes` value in the data (common with Parquet text columns) | `.decode("utf-8")` the column before writing |
 | `ModuleNotFoundError` | Package not in `requirements.txt` | Add it and restart |
 | CORS error on a request | Server doesn't allow `https://addin.xlwings.org` | Add the header, or use your own CORS proxy |
 | Custom function shows `#VALUE!` | A `None` (blank cell) reached arithmetic, or the module has an error | Section 8.2 and 8.4 |
@@ -628,7 +677,8 @@ The run id makes sure you never read a stale result. A run usually returns in 1 
 
 ## Version History
 
-- **3.2 (20 October 2026):** New section 17: how an AI coding agent can run and test xlwings Lite code in the user's Excel by itself (Windows desktop).
-- **3.1 (20 October 2026):** Custom functions re-tested in real Excel: what inputs arrive as (text stays text, blanks and error cells arrive as `None`), numeric hints don't convert, `inf` returns as `0`.
-- **3.0 (20 October 2026):** Rewritten and re-tested in real Excel against add-in build 1.0.0.104, xlwings 0.37.7 and pandas 3. Corrects several version 2 rules that no longer hold (RGB colours, mixed-type columns, 2D list writes, named tables in loops, single-argument scripts) and adds the snapshot/flush model, pandas 3 notes, text auto-conversion and the current API support table.
+- **3.3 (22 October 2026):** Databases (DuckDB, Parquet, SQLite), API keys in environment variables, web requests with retries, and conventions for batch tools, sheet buttons and status messages.
+- **3.2 (20 October 2026):** How an AI coding agent can run and test code in the user's Excel by itself.
+- **3.1 (20 October 2026):** Custom functions re-tested: how cell inputs arrive.
+- **3.0 (20 October 2026):** Full rewrite, re-tested in real Excel on the current build with pandas 3.
 - **2.x (November 2025):** Compressed edition of the original guide.
