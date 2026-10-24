@@ -1,6 +1,6 @@
 # xlwings Lite: Coding Guidelines for AI Coders (Humans Welcome)
 
-**Version 3.3 · 22 October 2026.** The latest copy is always at https://www.tigzig.com/files/xlwings/AI_CODER_INSTRUCTIONS.md. If your copy shows a lower version number, download the latest. Changes are listed under Version History at the end.
+**Version 3.4 · 24 October 2026.** The latest copy is always at https://www.tigzig.com/files/xlwings/AI_CODER_INSTRUCTIONS.md. If your copy shows a lower version number, download the latest. Changes are listed under Version History at the end.
 
 **Tested on:** xlwings Lite add-in build 1.0.0.104 (the Python package inside it: xlwings 0.37.7), Pyodide 314.0.1 (Python 3.14.2, pandas 3.0.2, numpy 2.4.3), Excel desktop on Windows. Every platform behaviour marked **[tested]** was run in Excel on that build. Items marked **[docs]** come from the official documentation and were not re-run here.
 
@@ -353,6 +353,7 @@ def debug_input(cell: Any) -> str:
 - xlwings Lite records exact installed versions in `requirements-pinned.txt` (Pyodide 314+) and reinstalls them on every restart. Don't pin exact versions in `requirements.txt`; use an upper bound if needed (`xlwings<1.0.0`). [docs]
 - Packages must be pure Python or built for Pyodide. Not available: anything needing `multiprocessing`/`threading`, PyTorch, direct TCP clients. [docs]
 - Not installed by default on the tested build: `requests`, `httpx`, `polars`. [tested]
+- `scikit-learn` and `xgboost` install from `requirements.txt` and run (scikit-learn 1.8, xgboost 2.1.4). [tested]
 - Quick trial without editing requirements: `import micropip; await micropip.install("requests")` inside an async script works. For a finished tool, put the package in `requirements.txt`. [tested]
 - Private wheels: a CORS-enabled URL in `requirements.txt`, or `/data/my-package.whl` after uploading. [docs]
 
@@ -427,10 +428,13 @@ def parse_pipe_delimited(text: str) -> pd.DataFrame:
 ### 12.3 Databases: DuckDB, SQLite and Parquet
 There are no TCP sockets in the browser, so there are no direct PostgreSQL or MySQL connections. For a server database, put a web API in front of it (FastAPI, PostgREST, Supabase, Oracle ORDS, MySQL REST Service, NocoDB). [docs]
 
+**Neon Postgres** is the exception: it has an HTTPS SQL endpoint you can call directly. `pyfetch("https://<neon-host>/sql", method="POST", headers={"Neon-Connection-String": os.getenv("NEON_DATABASE_URL")}, body=json.dumps({"query": sql, "params": []}))`. Send no `Content-Type` header: Neon's CORS allow-list doesn't include it and the browser blocks the call. Numeric columns come back as text; cast them. [tested]
+
 Data you can download runs locally, inside the browser: [tested]
 - **DuckDB** works: add `duckdb` to `requirements.txt`. SQL on pandas DataFrames, reading and writing Parquet, and a persistent `.duckdb` database file under `/data` all work.
 - **Remote files:** download first with `pyfetch`, save under `/data`, then query. DuckDB can't read an `https://` URL directly here, because its `httpfs` extension can't be installed in the browser.
 - **Files on hosts without CORS headers** (for example GitHub release assets) need a CORS proxy you own (section 12.1).
+- **Private GitHub repository files:** raw.githubusercontent.com does not accept a token from the browser. Use `https://api.github.com/repos/<owner>/<repo>/contents/<path>?ref=<branch>` with headers `Authorization: token <PAT>` and `Accept: application/vnd.github.raw` (files up to 100 MB). [tested]
 - **Parquet:** read it with DuckDB. `pandas.read_parquet` needs `pyarrow`, which isn't installed by default; in our test it installed but couldn't read the sample file, while DuckDB read it fine.
 - **SQLite:** Python's built-in `sqlite3` works on a downloaded `.db` file. [docs]
 
@@ -677,6 +681,7 @@ The run id makes sure you never read a stale result. A run usually returns in 1 
 
 ## Version History
 
+- **3.4 (24 October 2026):** Neon Postgres over HTTPS without a server, private GitHub files with a token, scikit-learn and XGBoost.
 - **3.3 (22 October 2026):** Databases (DuckDB, Parquet, SQLite), API keys in environment variables, web requests with retries, and conventions for batch tools, sheet buttons and status messages.
 - **3.2 (20 October 2026):** How an AI coding agent can run and test code in the user's Excel by itself.
 - **3.1 (20 October 2026):** Custom functions re-tested: how cell inputs arrive.
