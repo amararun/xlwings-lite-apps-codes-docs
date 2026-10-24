@@ -167,13 +167,13 @@ def run_imdb_stats(book: xw.Book):
     print("   Creating Titles by Decade...")
     by_decade = conn.execute("""
         SELECT
-            (startYear / 10) * 10 as Decade,
+            CAST(startYear // 10 * 10 AS INTEGER) as Decade,
             COUNT(*) as Total,
             COUNT(CASE WHEN titleType = 'movie' THEN 1 END) as Films,
             COUNT(CASE WHEN titleType = 'tvSeries' THEN 1 END) as TV_Series
         FROM title_basics
         WHERE startYear IS NOT NULL AND startYear >= 1900 AND startYear <= 2025
-        GROUP BY (startYear / 10) * 10
+        GROUP BY 1
         ORDER BY Decade
     """).fetchall()
 
@@ -270,7 +270,7 @@ def run_imdb_stats(book: xw.Book):
             type_vals.append(other_count)
 
         fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-        colors = plt.cm.Set3(range(len(types)))
+        colors = ["#1F4E79", "#4472C4", "#9DC3E6", "#FF6D00", "#F4B183", "#BFBFBF"][:len(types)]
         ax.pie(type_vals, labels=types, autopct="%1.1f%%", colors=colors, startangle=90)
         ax.set_title("Title Type Distribution", fontsize=12, fontweight="bold")
         plt.tight_layout()

@@ -1,7 +1,7 @@
 # Cricket Statistics Module - Remote Loadable
 #
-# This module is loaded remotely by main-duckdb-remote.py from GitHub.
-# Contains all Cricket player stats generation logic (tables + charts).
+# Loaded at runtime by the xlwings Lite Data Importer (run_stats) from GitHub.
+# Cricket player stats (tables + charts) using scorecard definitions, see DOCS sheet.
 #
 # Usage: Fetched at runtime, cached in memory for the session.
 
@@ -34,110 +34,100 @@ def ensure_sheet_exists(book: xw.Book, sheet_name: str) -> xw.Sheet:
     return book.sheets.add(name=sheet_name)
 
 
+NOT_BATTER_OUT = "('retired hurt', 'retired not out')"
+NOT_BOWLER_WICKET = ("('run out', 'retired hurt', 'retired not out', 'retired out', "
+                     "'obstructing the field', 'handled the ball', 'timed out')")
+
+
+def _innings_filter(match_type: str) -> str:
+    """Super overs are stored as innings 3+ in limited-overs matches and are left out of career figures."""
+    if match_type.upper() in ("TEST", "MDM"):
+        return ""
+    return "AND innings <= 2"
+
+
 def get_batting_stats_query(table_name: str, match_type: str, limit: int = 30) -> str:
-    """Returns SQL query for top batsmen by runs for a specific match type."""
+    """Top batters by runs, scorecard definitions: balls faced exclude wides, a dismissal counts
+    at either end (run out as non-striker), innings = innings at the crease."""
+    mt = match_type.replace("'", "''")
     return f"""
-    SELECT
-        striker as Player,
-        COUNT(DISTINCT match_id) as Mat,
-        COUNT(DISTINCT match_id) as Inns,
-        CAST(SUM(TRY_CAST(runs_off_bat AS INTEGER)) AS INTEGER) as Runs,
-        COUNT(*) as BF,
-        SUM(CASE
-            WHEN wicket_type IS NOT NULL
-                AND player_dismissed = striker
-                AND wicket_type NOT IN ('retired hurt', 'retired not out')
-            THEN 1 ELSE 0
-        END) as Outs,
-        COUNT(DISTINCT match_id) - SUM(CASE
-            WHEN wicket_type IS NOT NULL
-                AND player_dismissed = striker
-                AND wicket_type NOT IN ('retired hurt', 'retired not out')
-            THEN 1 ELSE 0
-        END) as NO,
-        CASE
-            WHEN SUM(CASE WHEN wicket_type IS NOT NULL AND player_dismissed = striker
-                          AND wicket_type NOT IN ('retired hurt', 'retired not out')
-                          THEN 1 ELSE 0 END) > 0
-            THEN ROUND(CAST(SUM(TRY_CAST(runs_off_bat AS INTEGER)) AS DOUBLE) /
-                       SUM(CASE WHEN wicket_type IS NOT NULL AND player_dismissed = striker
-                                AND wicket_type NOT IN ('retired hurt', 'retired not out')
-                                THEN 1 ELSE 0 END), 2)
-            ELSE CAST(SUM(TRY_CAST(runs_off_bat AS INTEGER)) AS DOUBLE)
-        END as Avg,
-        ROUND(CAST(SUM(TRY_CAST(runs_off_bat AS INTEGER)) AS DOUBLE) / NULLIF(COUNT(*), 0) * 100, 2) as SR,
-        SUM(CASE WHEN TRY_CAST(runs_off_bat AS INTEGER) = 4 THEN 1 ELSE 0 END) as "4s",
-        SUM(CASE WHEN TRY_CAST(runs_off_bat AS INTEGER) = 6 THEN 1 ELSE 0 END) as "6s",
-        CASE
-            WHEN SUM(TRY_CAST(runs_off_bat AS INTEGER)) > 0
-            THEN ROUND((SUM(CASE WHEN TRY_CAST(runs_off_bat AS INTEGER) = 4 THEN 4 ELSE 0 END) +
-                        SUM(CASE WHEN TRY_CAST(runs_off_bat AS INTEGER) = 6 THEN 6 ELSE 0 END)) * 100.0 /
-                       SUM(TRY_CAST(runs_off_bat AS INTEGER)), 1)
-            ELSE 0
-        END as "Bnd%"
-    FROM "{table_name}"
-    WHERE match_type = '{match_type}'
-    GROUP BY striker
-    HAVING COUNT(DISTINCT match_id) >= 5
-    ORDER BY Runs DESC
+    WITH d AS (
+        SELECT * FROM "{table_name}" WHERE match_type = '{mt}' {_innings_filter(match_type)}
+    ),
+    bat AS (
+        SELECT striker AS Player,
+            SUM(COALESCE(TRY_CAST(runs_off_bat AS INTEGER), 0)) AS Runs,
+            SUM(CASE WHEN COALESCE(TRY_CAST(wides AS INTEGER), 0) = 0 THEN 1 ELSE 0 END) AS BF,
+            SUM(CASE WHEN TRY_CAST(runs_off_bat AS INTEGER) = 4 THEN 1 ELSE 0 END) AS fours,
+            SUM(CASE WHEN TRY_CAST(runs_off_bat AS INTEGER) = 6 THEN 1 ELSE 0 END) AS sixes
+        FROM d GROUP BY striker
+    ),
+    crease AS (
+        SELECT Player, COUNT(DISTINCT match_id) AS Mat,
+               COUNT(DISTINCT CAST(match_id AS VARCHAR) || '-' || CAST(innings AS VARCHAR)) AS Inns
+        FROM (SELECT match_id, innings, striker AS Player FROM d
+              UNION ALL SELECT match_id, innings, non_striker AS Player FROM d)
+        GROUP BY Player
+    ),
+    outs AS (
+        SELECT player_dismissed AS Player, COUNT(*) AS Outs
+        FROM d
+        WHERE wicket_type IS NOT NULL AND wicket_type NOT IN {NOT_BATTER_OUT}
+        GROUP BY player_dismissed
+    )
+    SELECT b.Player, c.Mat, c.Inns,
+        CAST(b.Runs AS INTEGER) AS Runs,
+        CAST(b.BF AS INTEGER) AS BF,
+        CAST(COALESCE(o.Outs, 0) AS INTEGER) AS Outs,
+        CAST(c.Inns - COALESCE(o.Outs, 0) AS INTEGER) AS "NO",
+        CASE WHEN COALESCE(o.Outs, 0) > 0 THEN ROUND(b.Runs / o.Outs, 2) END AS "Avg",
+        ROUND(b.Runs * 100.0 / NULLIF(b.BF, 0), 2) AS SR,
+        CAST(b.fours AS INTEGER) AS "4s",
+        CAST(b.sixes AS INTEGER) AS "6s",
+        CASE WHEN b.Runs > 0 THEN ROUND((b.fours * 4 + b.sixes * 6) * 100.0 / b.Runs, 1) ELSE 0 END AS "Bnd%"
+    FROM bat b
+    JOIN crease c ON c.Player = b.Player
+    LEFT JOIN outs o ON o.Player = b.Player
+    WHERE c.Mat >= 5
+    ORDER BY Runs DESC, b.Player
     LIMIT {limit}
     """
 
 
 def get_bowling_stats_query(table_name: str, match_type: str, limit: int = 30) -> str:
-    """Returns SQL query for top bowlers by wickets for a specific match type."""
+    """Top bowlers by wickets, scorecard definitions: overs from legal balls only (no wides or
+    no-balls), runs conceded = off the bat + wides + no-balls (byes and leg byes are not the bowler's)."""
+    mt = match_type.replace("'", "''")
     return f"""
-    SELECT
-        bowler as Player,
-        COUNT(DISTINCT match_id) as Mat,
-        ROUND(COUNT(*) / 6.0, 1) as Overs,
-        CAST(SUM(COALESCE(TRY_CAST(runs_off_bat AS INTEGER), 0) +
-                 COALESCE(TRY_CAST(wides AS INTEGER), 0) +
-                 COALESCE(TRY_CAST(noballs AS INTEGER), 0)) AS INTEGER) as Runs,
-        SUM(CASE
-            WHEN wicket_type IS NOT NULL
-                AND wicket_type NOT IN ('run out', 'retired hurt', 'retired not out',
-                                        'retired out', 'obstructing the field')
-            THEN 1 ELSE 0
-        END) as Wkts,
-        ROUND(CAST(SUM(COALESCE(TRY_CAST(runs_off_bat AS INTEGER), 0) +
-                       COALESCE(TRY_CAST(wides AS INTEGER), 0) +
-                       COALESCE(TRY_CAST(noballs AS INTEGER), 0)) AS DOUBLE) / NULLIF(COUNT(*) / 6.0, 0), 2) as Econ,
-        CASE
-            WHEN SUM(CASE WHEN wicket_type IS NOT NULL
-                          AND wicket_type NOT IN ('run out', 'retired hurt', 'retired not out',
-                                                  'retired out', 'obstructing the field')
-                          THEN 1 ELSE 0 END) > 0
-            THEN ROUND(CAST(SUM(COALESCE(TRY_CAST(runs_off_bat AS INTEGER), 0) +
-                               COALESCE(TRY_CAST(wides AS INTEGER), 0) +
-                               COALESCE(TRY_CAST(noballs AS INTEGER), 0)) AS DOUBLE) /
-                       SUM(CASE WHEN wicket_type IS NOT NULL
-                                AND wicket_type NOT IN ('run out', 'retired hurt', 'retired not out',
-                                                        'retired out', 'obstructing the field')
-                                THEN 1 ELSE 0 END), 2)
-            ELSE 0
-        END as Avg,
-        CASE
-            WHEN SUM(CASE WHEN wicket_type IS NOT NULL
-                          AND wicket_type NOT IN ('run out', 'retired hurt', 'retired not out',
-                                                  'retired out', 'obstructing the field')
-                          THEN 1 ELSE 0 END) > 0
-            THEN ROUND(CAST(COUNT(*) AS DOUBLE) /
-                       SUM(CASE WHEN wicket_type IS NOT NULL
-                                AND wicket_type NOT IN ('run out', 'retired hurt', 'retired not out',
-                                                        'retired out', 'obstructing the field')
-                                THEN 1 ELSE 0 END), 1)
-            ELSE 0
-        END as SR,
-        ROUND(SUM(CASE WHEN COALESCE(TRY_CAST(runs_off_bat AS INTEGER), 0) = 0
-                       AND COALESCE(TRY_CAST(wides AS INTEGER), 0) = 0
-                       AND COALESCE(TRY_CAST(noballs AS INTEGER), 0) = 0 THEN 1 ELSE 0 END) *
-              100.0 / NULLIF(COUNT(*), 0), 1) as "Dot%"
-    FROM "{table_name}"
-    WHERE match_type = '{match_type}'
-    GROUP BY bowler
-    HAVING COUNT(DISTINCT match_id) >= 5
-    ORDER BY Wkts DESC
+    WITH d AS (
+        SELECT *,
+            COALESCE(TRY_CAST(runs_off_bat AS INTEGER), 0) AS rb,
+            COALESCE(TRY_CAST(wides AS INTEGER), 0) AS wd,
+            COALESCE(TRY_CAST(noballs AS INTEGER), 0) AS nb
+        FROM "{table_name}" WHERE match_type = '{mt}' {_innings_filter(match_type)}
+    ),
+    agg AS (
+        SELECT bowler AS Player,
+            COUNT(DISTINCT match_id) AS Mat,
+            SUM(CASE WHEN wd = 0 AND nb = 0 THEN 1 ELSE 0 END) AS Balls,
+            SUM(rb + wd + nb) AS Runs,
+            SUM(CASE WHEN wicket_type IS NOT NULL AND wicket_type NOT IN {NOT_BOWLER_WICKET}
+                     THEN 1 ELSE 0 END) AS Wkts,
+            SUM(CASE WHEN wd = 0 AND nb = 0 AND rb = 0 THEN 1 ELSE 0 END) AS Dots
+        FROM d GROUP BY bowler
+    )
+    SELECT Player, Mat,
+        CAST(Balls // 6 AS VARCHAR) || '.' || CAST(Balls % 6 AS VARCHAR) AS Overs,
+        CAST(Balls AS INTEGER) AS Balls,
+        CAST(Runs AS INTEGER) AS Runs,
+        CAST(Wkts AS INTEGER) AS Wkts,
+        ROUND(Runs * 6.0 / NULLIF(Balls, 0), 2) AS Econ,
+        CASE WHEN Wkts > 0 THEN ROUND(Runs * 1.0 / Wkts, 2) END AS "Avg",
+        CASE WHEN Wkts > 0 THEN ROUND(Balls * 1.0 / Wkts, 1) END AS SR,
+        ROUND(Dots * 100.0 / NULLIF(Balls, 0), 1) AS "Dot%"
+    FROM agg
+    WHERE Mat >= 5
+    ORDER BY Wkts DESC, Player
     LIMIT {limit}
     """
 
@@ -192,9 +182,9 @@ def create_batting_chart(df: pd.DataFrame, match_type: str, num_players: int = 1
 
     # MIDDLE: Strike Rate & Average
     sr = chart_df['SR'].tolist()
-    avg = chart_df['Avg'].tolist()
+    avg = chart_df['Avg'].astype(float).tolist()
     ax2.plot(x_pos, sr, 'o-', color='#FF6D00', linewidth=2, markersize=6, label='Strike Rate')
-    ax2.plot(x_pos, avg, 's--', color='#2E7D32', linewidth=2, markersize=5, label='Average')
+    ax2.plot(x_pos, avg, 's--', color='#1F4E79', linewidth=2, markersize=5, label='Average')
     ax2.set_ylabel('SR / Avg', fontsize=10, fontweight='bold', color='#333333')
     ax2.legend(loc='upper right', fontsize=9)
     ax2.grid(axis='y', alpha=0.3)
@@ -203,8 +193,8 @@ def create_batting_chart(df: pd.DataFrame, match_type: str, num_players: int = 1
     # BOTTOM: 4s and 6s
     fours = chart_df['4s'].tolist()
     sixes = chart_df['6s'].tolist()
-    ax3.bar(x_pos, fours, color='#26A69A', alpha=0.85, label='4s', width=0.7)
-    ax3.bar(x_pos, sixes, bottom=fours, color='#EF5350', alpha=0.85, label='6s', width=0.7)
+    ax3.bar(x_pos, fours, color='#9DC3E6', alpha=0.85, label='4s', width=0.7)
+    ax3.bar(x_pos, sixes, bottom=fours, color='#FF6D00', alpha=0.85, label='6s', width=0.7)
     ax3.set_ylabel('Boundaries', fontsize=10, fontweight='bold', color='#333333')
     ax3.legend(loc='upper right', fontsize=9)
     ax3.grid(axis='y', alpha=0.3)
@@ -232,7 +222,7 @@ def create_bowling_chart(df: pd.DataFrame, match_type: str, num_players: int = 1
 
     # TOP: Wickets
     wickets = chart_df['Wkts'].tolist()
-    bars = ax1.bar(x_pos, wickets, color='#2E7D32', alpha=0.85, label='Wickets', width=0.7)
+    bars = ax1.bar(x_pos, wickets, color='#4472C4', alpha=0.85, label='Wickets', width=0.7)
     for bar, wkt in zip(bars, wickets):
         ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
                 f'{int(wkt)}', ha='center', va='bottom', fontsize=7, color='#333333')
@@ -244,9 +234,9 @@ def create_bowling_chart(df: pd.DataFrame, match_type: str, num_players: int = 1
 
     # MIDDLE: Economy & Average
     econ = chart_df['Econ'].tolist()
-    avg = chart_df['Avg'].tolist()
+    avg = chart_df['Avg'].astype(float).tolist()
     ax2.plot(x_pos, econ, 'o-', color='#FF6D00', linewidth=2, markersize=6, label='Economy')
-    ax2.plot(x_pos, avg, 's--', color='#9C27B0', linewidth=2, markersize=5, label='Average')
+    ax2.plot(x_pos, avg, 's--', color='#1F4E79', linewidth=2, markersize=5, label='Average')
     ax2.set_ylabel('Econ / Avg', fontsize=10, fontweight='bold', color='#333333')
     ax2.legend(loc='upper right', fontsize=9)
     ax2.grid(axis='y', alpha=0.3)
@@ -254,13 +244,11 @@ def create_bowling_chart(df: pd.DataFrame, match_type: str, num_players: int = 1
 
     # BOTTOM: Dot Ball Percentage
     dot_pct = chart_df['Dot%'].tolist()
-    colors = ['#26A69A' if d >= 50 else '#FF9800' if d >= 40 else '#EF5350' for d in dot_pct]
-    bars3 = ax3.bar(x_pos, dot_pct, color=colors, alpha=0.85, width=0.7)
+    bars3 = ax3.bar(x_pos, dot_pct, color='#4472C4', alpha=0.85, width=0.7)
     for bar, pct in zip(bars3, dot_pct):
         ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
                 f'{pct:.0f}%', ha='center', va='bottom', fontsize=7, color='#333333')
     ax3.set_ylabel('Dot%', fontsize=10, fontweight='bold', color='#333333')
-    ax3.axhline(y=50, color='#26A69A', linestyle='--', alpha=0.5, linewidth=1)
     ax3.set_ylim(0, max(dot_pct) * 1.15)
     ax3.grid(axis='y', alpha=0.3)
     ax3.set_xticks(x_pos)
@@ -365,6 +353,7 @@ def run_cricket_stats(book: xw.Book, file_type: str, file_path: str):
 
     temp_dir = tempfile.gettempdir()
     sheets_created = 0
+    docs_written = False
 
     for table_name, source_label in valid_tables:
         print(f"\n   Processing: {source_label}")
@@ -400,8 +389,8 @@ def run_cricket_stats(book: xw.Book, file_type: str, file_path: str):
         # -------------------------------------------------------------------------
         # PHASE 4: CREATE DOCS SHEET
         # -------------------------------------------------------------------------
-        docs_exists = any(s.name == 'DOCS' for s in book.sheets)
-        if not docs_exists:
+        if not docs_written:
+            docs_written = True
             print("\n[4/5] Creating DOCS sheet...")
             try:
                 docs_sheet = ensure_sheet_exists(book, 'DOCS')
@@ -422,13 +411,17 @@ def run_cricket_stats(book: xw.Book, file_type: str, file_path: str):
                 current_row += 2
 
                 batting_docs = pd.DataFrame([
-                    ["Mat", "Matches played as a batsman", "COUNT(DISTINCT match_id)"],
-                    ["Runs", "Total runs scored off the bat", "SUM(runs_off_bat)"],
-                    ["BF", "Balls faced", "COUNT(*) of all deliveries faced"],
-                    ["Avg", "Batting average", "Runs / Outs"],
-                    ["SR", "Strike rate", "(Runs / BF) * 100"],
-                    ["4s", "Fours hit", "COUNT where runs_off_bat = 4"],
-                    ["6s", "Sixes hit", "COUNT where runs_off_bat = 6"],
+                    ["Mat", "Matches in which the player batted (at either end)", "COUNT(DISTINCT match_id)"],
+                    ["Inns", "Innings at the crease (as striker or non-striker)", "COUNT(DISTINCT match_id + innings)"],
+                    ["Runs", "Runs scored off the bat", "SUM(runs_off_bat)"],
+                    ["BF", "Balls faced (wides do not count as balls faced)", "COUNT of deliveries faced where wides = 0"],
+                    ["Outs", "Dismissals at either end, incl. run out as non-striker", "COUNT where player_dismissed = player, excl. retired hurt / retired not out"],
+                    ["NO", "Not outs", "Inns - Outs"],
+                    ["Avg", "Batting average (blank if never out)", "Runs / Outs"],
+                    ["SR", "Strike rate", "Runs / BF * 100"],
+                    ["4s / 6s", "Fours and sixes hit", "COUNT where runs_off_bat = 4 / 6"],
+                    ["Bnd%", "Share of runs from boundaries", "(4s * 4 + 6s * 6) / Runs * 100"],
+                    ["Note", "Limited-overs matches", "Super overs (innings 3 and later) are left out, as in official records"],
                 ], columns=["Metric", "Description", "Formula"])
                 docs_sheet.range(f"A{current_row}").options(index=False).value = batting_docs
                 current_row += len(batting_docs) + 4
@@ -437,16 +430,19 @@ def run_cricket_stats(book: xw.Book, file_type: str, file_path: str):
                 docs_sheet.range(f"A{current_row}").value = "BOWLING METRICS"
                 docs_sheet.range(f"A{current_row}").font.bold = True
                 docs_sheet.range(f"A{current_row}").font.size = 14
-                docs_sheet.range(f"A{current_row}").font.color = '#2E7D32'
+                docs_sheet.range(f"A{current_row}").font.color = '#1F4E79'
                 current_row += 2
 
                 bowling_docs = pd.DataFrame([
                     ["Mat", "Matches bowled in", "COUNT(DISTINCT match_id)"],
-                    ["Overs", "Overs bowled", "Balls / 6"],
-                    ["Wkts", "Wickets taken", "Excludes run outs, retired"],
-                    ["Econ", "Economy rate", "Runs / Overs"],
-                    ["Avg", "Bowling average", "Runs / Wickets"],
-                    ["Dot%", "Dot ball percentage", "Dot balls / Total balls * 100"],
+                    ["Balls", "Legal balls bowled (wides and no-balls are not counted)", "COUNT where wides = 0 and noballs = 0"],
+                    ["Overs", "Overs in cricket notation (6 balls)", "Balls // 6 . Balls % 6"],
+                    ["Runs", "Runs conceded (byes and leg byes are not the bowler's)", "SUM(runs_off_bat + wides + noballs)"],
+                    ["Wkts", "Wickets credited to the bowler", "Excludes run out, retired, obstructing the field, handled the ball, timed out"],
+                    ["Econ", "Economy rate", "Runs / Balls * 6"],
+                    ["Avg", "Bowling average", "Runs / Wkts"],
+                    ["SR", "Bowling strike rate", "Balls / Wkts"],
+                    ["Dot%", "Legal balls with no run off the bat and no extra", "Dots / Balls * 100"],
                 ], columns=["Metric", "Description", "Formula"])
                 docs_sheet.range(f"A{current_row}").options(index=False).value = bowling_docs
 
@@ -502,7 +498,7 @@ def run_cricket_stats(book: xw.Book, file_type: str, file_path: str):
                     charts_sheet.range("A2").value = f"Generated: {time.strftime('%Y-%m-%d %H:%M')} (Remote Module)"
                     charts_sheet.range("A2").font.size = 12
 
-                    charts_sheet.range("A3").value = "Showcasing analytics & chart generation. Formulas under validation."
+                    charts_sheet.range("A3").value = "Top 15 by runs and by wickets. Definitions on the DOCS sheet."
                     charts_sheet.range("A3").font.size = 12
 
                     scale_factor = 0.5
