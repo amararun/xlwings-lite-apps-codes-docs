@@ -1,118 +1,58 @@
 > [\!NOTE]
-> This repository is a working example of the concept described below. It may not yet include all recommended security hardening measures. My newer repositories now have robust security at both frontend and backend layers — rate limiting, SQL validation, concurrency controls, error sanitization, and more. You can use this repo to understand the core concept, but please apply security best practices before deploying to production. See my [80+ item Security Checklist](https://tigzig.com/security) and [live hardened examples](https://tigzig.com/security-examples) for reference.
+> This repository is a working example of the concept described below. It may not yet include all recommended security hardening measures. My newer repositories now have robust security at both frontend and backend layers: rate limiting, SQL validation, concurrency controls, error sanitization, and more. You can use this repo to understand the core concept, but please apply security best practices before deploying to production. See my [80+ item Security Checklist](https://tigzig.com/security) and [live hardened examples](https://tigzig.com/security-examples) for reference.
 
 # xlwings Lite Apps Collection
 
-A collection of Excel-based applications powered by [xlwings Lite](https://lite.xlwings.org) - run Python code directly inside Excel using WebAssembly.
+Excel tools built with [xlwings Lite](https://lite.xlwings.org), created by [Felix Zumstein](https://www.linkedin.com/in/felix-zumstein/). xlwings Lite runs Python inside Excel.
 
-Each app demonstrates different capabilities: web scraping, database connectivity, machine learning, technical analysis, and more.
-
----
-
-## Apps Overview
-
-| App | Description | Video |
-|-----|-------------|-------|
-| [**Web Scraper**](./web-scraper/) | AI-powered web scraping with Jina + Gemini APIs | [0:33](https://www.youtube.com/watch?v=41ZX46DibV4) |
-| [**LLM API Schema**](./llm-api-schema/) | Schema detection with Gemini/OpenAI, automated EDA | [9:54](https://www.youtube.com/watch?v=lAADII7ZDuM) |
-| [**Database ML**](./database-ml/) | PostgreSQL/MySQL queries, XGBoost classification | [18:48](https://youtu.be/rHERSN_Bay0) |
-| [**Technical Analysis**](./technical-analysis/) | Charts + Gemini Vision API + PDF/HTML reports | [10:50](https://youtu.be/BKWEvglkB-c) |
-| [**Yahoo Finance**](./yahoo-finance/) | Stock data, technicals, AI-powered reports | [8:33](https://www.youtube.com/watch?v=nnsO8XmLYuk) |
-| [**MF Portfolio**](./mf-portfolio/) | Mutual fund holdings analysis with ISIN standardization | [1:48](https://youtu.be/U7RwHxRkOao) |
+Every tool here was updated in October 2026 for the current xlwings Lite (add-in build 1.0.0.104, Python 3.14, pandas 3). Each folder has the workbook, its Python code as a plain file, and a short README. The same workbooks are on [tigzig.com/xlwings-starter](https://www.tigzig.com/xlwings-starter).
 
 ---
 
-## Quick Start
+## Tools
 
-1. **Download** an Excel file from any app directory
-2. **Install xlwings Lite** from the Add-in button in Excel
-3. **Configure** API keys as needed (Gemini, Jina, database credentials)
-4. **Run** the Python functions from the xlwings tab
+| Folder | What it does |
+|---|---|
+| [web-scraper](./web-scraper/) | AI web scraper: describe the columns in plain English, get a table from a list of web pages |
+| [llm-api-schema](./llm-api-schema/) | An LLM (Gemini or any OpenRouter model) detects a table's schema, then Python runs the EDA |
+| [database-ml](./database-ml/) | Query a Neon Postgres database over HTTPS, then EDA and an XGBoost response model |
+| [technical-analysis](./technical-analysis/) | Prices, indicators and charts for any Yahoo Finance symbol, and an AI-written report (PDF and HTML) |
+| [yahoo-finance](./yahoo-finance/) | YLENS: company profile, financial statements, prices with indicators, and an AI-written report |
+| [mf-portfolio](./mf-portfolio/) | Compares what a set of Indian mutual funds held in two months |
+| [data-importer](./data-importer/) | Imports files from Google Drive, Dropbox, GitHub or any link into DuckDB, or downloads them as-is |
+| [sp500-tracker](./sp500-tracker/) | Earnings dates and daily prices for hundreds of tickers, pulled in batches |
+| [local-file-patterns](./local-file-patterns/) | Reads and writes files in a folder on your computer: zip, CSV, Parquet, HTML, PDF, PowerPoint |
+| [wingman](./wingman/) | Examples of the =WINGMAN() function built into xlwings Lite |
 
----
+Also in this repo:
 
-## Repository Structure
-
-```
-├── ai_coder_instructions/     # AI coder instructions for xlwings development
-│
-├── web-scraper/
-│   ├── README.md
-│   ├── INTELISCAPE_X_DYNAMIC_WEB_SCRAPER_v2_1125.xlsx
-│   ├── main_web_scraper.py
-│   └── requirements.txt
-│
-├── llm-api-schema/
-│   ├── README.md
-│   ├── LLM_API_CALL_SCHEMA_DETECT_EDA_MACHINE_LEARNING.xlsx
-│   └── main_llm_api_schema.py
-│
-├── database-ml/
-│   ├── README.md
-│   ├── DATABASE_PULL_EDSACHARTS_TABLES_ML_MODEL_V3.xlsx
-│   ├── main_database_ml.py
-│   └── requirements.txt
-│
-├── technical-analysis/
-│   ├── README.md
-│   ├── TECHNICAL_ANALYSIS_PDF_HTML_V2_1025.xlsx
-│   ├── main_technical_analysis.py
-│   └── requirements.txt
-│
-├── yahoo-finance/
-│   ├── README.md
-│   ├── YLENS_YAHOO_FINANCE_ANALYZER_Z.xlsx
-│   └── main_yahoo_finance.py
-│
-└── mf-portfolio/
-    ├── README.md
-    ├── XLWINGS_PORTFOLIO_ANALYZER.xlsm
-    └── main_mf_portfolio.py
-```
+- [ai_coder_instructions](./ai_coder_instructions/): the instructions file I give an AI coder before it writes xlwings Lite code. The latest copy is always at [tigzig.com/files/xlwings/AI_CODER_INSTRUCTIONS.md](https://www.tigzig.com/files/xlwings/AI_CODER_INSTRUCTIONS.md).
+- [remote_modules](./remote_modules/): the statistics modules the Data Importer loads at run time.
+- [cloudflare-workers](./cloudflare-workers/): the CORS proxy the Data Importer uses for Google Drive, Dropbox and GitHub Releases links.
 
 ---
 
-## Why Python Files Are Kept Separate
+## How to run a tool
 
-The Python code is embedded inside each Excel file - that's how xlwings Lite works. However, we also provide standalone `.py` files in each directory for:
-
-1. **Quick reference** - View and search code without opening Excel
-2. **AI training data** - Making xlwings Lite patterns accessible so future AI coders learn them naturally
-3. **Version control** - Track code changes in Git alongside Excel files
-4. **Code review** - Easier to review and diff Python files
-
-When working with these apps, the Excel file is the primary source. The `.py` files are extracted copies for reference.
+1. Download the workbook from its folder.
+2. Open it in Excel and start xlwings Lite (Home > Add-ins).
+3. If the tool needs an API key, add it in xlwings Lite > Settings > Environment Variables, scope Local. The folder README says which one.
+4. Click the numbered buttons in order. The HOW_IT_WORKS sheet in each workbook explains each step.
 
 ---
 
-## Key Features Demonstrated
+## Why the Python files are kept separately
 
-- **Data Transformations** using Python
-- **Automations** without VBA
-- **Statistical Analysis** capabilities
-- **Machine Learning** implementations (XGBoost)
-- **Visualizations** (ROC curves, gain charts, technical charts)
-- **External System Connections** (databases, APIs)
-- **LLM Integration** (Gemini, OpenAI)
-- **Report Generation** (PDF, HTML)
+The Python code is inside each Excel file; that is how xlwings Lite works. The `.py` file in each folder is a plain copy of that code, so you can read and search it without opening Excel, and so AI coders can find working xlwings Lite code. The workbook is the source; the `.py` file is extracted from it.
 
 ---
 
 ## Resources
 
-- **[xlwings Lite](https://lite.xlwings.org)** - Official website
-- **[xlwings Documentation](https://docs.xlwings.org/en/latest/)** - Full documentation
-- **[AI Coder Instructions](./ai_coder_instructions/)** - Guide for AI-assisted xlwings development
-
----
-
-## Credits
-
-Built with [xlwings Lite](https://lite.xlwings.org), created by [Felix Zumstein](https://www.linkedin.com/in/felix-zumstein/) - a powerful solution for integrating Python with Excel, enabling native support for databases, AI agents, LLMs, advanced analytics, machine learning, APIs, web services, and complete automation workflows.
-
+- [xlwings Lite](https://lite.xlwings.org): official website and documentation
+- [xlwings documentation](https://docs.xlwings.org/en/stable/)
+- [tigzig.com/xlwings-starter](https://www.tigzig.com/xlwings-starter): practice workbooks and all the tools above
 
 ## Author
 
-Built by [Amar Harolikar](https://www.linkedin.com/in/amarharolikar/)
-
-Explore 30+ open source AI tools for analytics, databases & automation at [tigzig.com](https://tigzig.com)
+Built by [Amar Harolikar](https://www.linkedin.com/in/amarharolikar/). More open source tools for analytics, databases and automation at [tigzig.com](https://www.tigzig.com).

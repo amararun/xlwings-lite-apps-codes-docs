@@ -1,70 +1,21 @@
-# xlwings Lite Data Importer
+# Data Importer
 
-Python script for importing data files into xlwings Lite from various cloud sources.
+Imports a file from a link (Google Drive, Dropbox, GitHub or any direct link) or from private storage with your own token, loads data files (Parquet, DuckDB, SQLite, CSV, TSV, pipe, TXT, JSON) into DuckDB and shows the tables, a column profile and sample rows. Any other file can be downloaded as-is, to /tmp or to a local folder.
 
-## downloader-links-secure-token-stats-raw.py
+Tool page: https://www.tigzig.com/xlwings-data-importer
 
-Main script with all data import functionality. Embedded in the xlwings Lite Data Importer Excel workbook.
+## Files
 
-### Features
+- `XLWINGS_LITE_DATA_IMPORTER_V2_17JAN2025_C.xlsx`: the tool. The Python code is inside the workbook.
+- `main_data_importer.py`: the same code as a plain file, to read or to give to an AI coder.
+- `requirements.txt`: the packages xlwings Lite installs for this workbook.
 
-#### 2A: Shareable Link Access (import_via_sharelink)
-- Import from any public/shareable URL
-- Supports: DuckIt, GitHub, Google Drive, Dropbox
-- File types: Parquet, DuckDB, SQLite, CSV, TSV, JSON
-- Uses CORS proxy for cross-origin downloads
-- Auto-detects file type and delimiter
+## How to run
 
-#### 2B: Token Access (import_via_token)
-- Import from private cloud storage
-- Dropbox: OAuth refresh token
-- Google Drive: OAuth refresh token
-- GitHub: Personal Access Token (PAT)
-- Direct API access (no proxy for Dropbox/GDrive)
+Open the workbook in Excel and start xlwings Lite (Home > Add-ins). Click the numbered buttons in order. The HOW_IT_WORKS sheet explains each step.
 
-#### 2C: Raw File Import (import_raw_sharelink, import_raw_token)
-- Download any file type as-is
-- PDF, images, ZIP, Excel, or data files
-- No DuckDB conversion
-- File saved with user-specified filename
+## Keys and setup
 
-### Sheet Layout
+None for public links. Token access: DROPBOX.REFRESH_TOKEN, DROPBOX.APP_KEY, DROPBOX.APP_SECRET; GDRIVE.REFRESH_TOKEN, GDRIVE.CLIENT_ID, GDRIVE.CLIENT_SECRET; GITHUB.PAT.
 
-**SHARE_LINK_ACCESS sheet:**
-- B5: Source URL
-- B7: Raw mode flag (1 = raw)
-- B8: Output filename (for raw mode)
-- D8: Output file path
-
-**TOKEN_ACCESS sheet:**
-- B5: Provider (Dropbox, Google Drive, GitHub)
-- B6: File path/ID
-- B7: Auth proxy URL (GitHub only)
-- B9: Raw mode flag (1 = raw)
-- B10: Output filename (for raw mode)
-- D10: Output file path
-
-### Environment Variables (for Token Access)
-
-**Dropbox:**
-- DROPBOX.APP_KEY
-- DROPBOX.APP_SECRET
-- DROPBOX.REFRESH_TOKEN
-
-**Google Drive:**
-- GDRIVE.CLIENT_ID
-- GDRIVE.CLIENT_SECRET
-- GDRIVE.REFRESH_TOKEN
-
-**GitHub:**
-- GITHUB.PAT
-
-### Functions
-
-| Function | Description |
-|----------|-------------|
-| import_via_sharelink | Import via shareable URL |
-| import_via_token | Import via OAuth/PAT |
-| import_raw_sharelink | Raw file download via URL |
-| import_raw_token | Raw file download via OAuth/PAT |
-| run_stats | Auto-detect and run statistics |
+Add keys in xlwings Lite > Settings > Environment Variables, scope Local. They stay in your browser and are not saved in the workbook.

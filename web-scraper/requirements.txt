@@ -1,8 +1,6 @@
-xlwings==0.33.11  # required
-python-dotenv==1.0.1  # required
+# Versions are automatically pinned in
+# requirements-pinned.txt
+xlwings  # required
 pyodide-http  # required
-black  # required
 pandas
 matplotlib
-seaborn
-requests

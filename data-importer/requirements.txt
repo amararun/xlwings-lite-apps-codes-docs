@@ -1,0 +1,5 @@
+xlwings
+pandas
+matplotlib
+duckdb
+pillow

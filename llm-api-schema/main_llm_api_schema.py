@@ -1,761 +1,448 @@
-import xlwings as xw
-from xlwings import script
+"""AI Workflows: LLM API calls from Excel with xlwings Lite.
+
+1a / 1b send the first rows of an Excel table to an LLM (Gemini, or any model on OpenRouter) and get back
+structured JSON: which columns are categorical or numeric, and a PostgreSQL type and
+description for every column. 2 runs a Python EDA on the columns the LLM picked.
+
+API keys are read from environment variables (xlwings Lite > Settings > Environment
+Variables, scope Local), so they stay in your browser and are never saved in the workbook.
+"""
+import asyncio
 import json
-import pandas as pd
-import traceback
-import requests  # Import requests instead of pyfetch
-import matplotlib.pyplot as plt
-import seaborn as sns
-import tempfile
 import os
+from typing import Any, Optional, Tuple
+
+import matplotlib.pyplot as plt
 import numpy as np
-from scipy import stats
-import httpx  # Replace aiohttp with httpx
+import pandas as pd
+import xlwings as xw
+from pyodide.http import pyfetch
+from xlwings import script
 
-@script
-async def analyze_table_schema_gemini(book: xw.Book):
-    """Analyze table schema using Gemini API to identify categorical and numeric variables."""
-    print("⭐⭐⭐ STARTING analyze_table_schema ⭐⭐⭐")
-    
-    # Read MASTER sheet parameters
-    master_sheet = book.sheets["MASTER"]
-    table_name = master_sheet["B6"].value
-    gemini_api_key = master_sheet["B4"].value
-    gemini_model = master_sheet["B3"].value
-    
-    # Find table in workbook
-    table = None
+CONTROL = "MASTER"
+TABLE_CELL = "C12"         # table to analyze
+GEMINI_MODEL_CELL = "C13"
+OPENROUTER_MODEL_CELL = "C14"
+STATUS_CELL = "A21"        # red (error) / dark blue (success) message
+SCHEMA_SHEET = "SCHEMA"    # results of 1a / 1b; 2. Run EDA reads B3:B5 from here
+SAMPLE_ROWS = 10
+
+BLUE = "#1F4E79"
+RED = "#C00000"
+HEADER_FILL = "#DDEBF7"
+
+
+# -------------------------
+# Small helpers
+# -------------------------
+def set_status(book: xw.Book, text: str, ok: bool):
+    cell = book.sheets[CONTROL][STATUS_CELL]
+    cell.value = text
+    cell.font.bold = True
+    cell.font.size = 12 if ok else 14
+    cell.font.color = BLUE if ok else RED
+
+
+def find_table(book: xw.Book, name: str) -> Tuple[Optional[xw.Sheet], Any]:
+    """Find an Excel table by name in any sheet (case-insensitive)."""
     for sheet in book.sheets:
-        if table_name in [t.name for t in sheet.tables]:
-            table = sheet.tables[table_name]
-            break
-    
-    if not table:
-        return
-    
-    # Get sample data
-    sample_data = table.range[:10, :].options(pd.DataFrame, index=False).value
-    
-    print("\n📊 Sample Data Preview:")
-    print("-" * 50)
-    print(sample_data.head(3).to_string())
-    print("-" * 50)
-    
-    # First API call for categorical/numeric classification
-    first_prompt = f"""
-    Analyze these rows from a dataset (including headers):
-    
-    {sample_data.to_string()}
-    
-    Task: Identify categorical and numeric variables for EDA.
-    Rules:
-    1. Exclude ID columns, meaningless numbers, and dates
-    2. Categorical variables: Text columns and numeric codes representing categories
-    3. Numeric variables: Continuous or discrete numbers suitable for statistical analysis
-    
-    Return ONLY a JSON object with exactly this structure:
-    {{
-        "categorical_variables": ["col1", "col2"],
-        "numeric_variables": ["col3", "col4"]
-    }}
-    """
-    
-    # Second API call for PostgreSQL schema generation
-    second_prompt = f"""
-    You are a PostgreSQL schema generator. Analyze the data and output ONLY a JSON schema.
-    
-    Sample data (first few rows including headers):
-    {sample_data.to_string()}
-    
-    Requirements:
-    1. Use standard PostgreSQL types (TEXT, NUMERIC, DATE, TIMESTAMP. Don't use INTEGER)
-    2. Column names must be SQL-safe (alphanumeric and underscores only)
-    3. Use NUMERIC for all values that can have decimal points
-    4. Use DATE or TIMESTAMP for dates
-    5. Use TEXT when unsure
-    
-    For descriptions:
-    1. Provide detailed descriptions up to 50 words
-    2. Include observed data patterns (e.g., "Contains categorical values like 'High', 'Medium', 'Low'")
-    3. Mention if values appear continuous, discrete, categorical, or temporal
-    4. Include example values from the data where helpful
-    5. Note any patterns like value ranges or common formats
-    6. Mention if it appears to be an ID, code, or reference field
-    
-    Return ONLY a JSON object with exactly this structure:
-    {{
-        "columns": [
-            {{"name": "column_name", "type": "postgresql_type", "description": "detailed description of data content and patterns"}}
-        ]
-    }}
-    """
-    
-    # Prepare API payloads
-    first_payload = {
-        "contents": [{"parts": [{"text": first_prompt}]}],
-        "generationConfig": {
-            "temperature": 0,
-            "response_mime_type": "application/json",
-            "response_schema": {
-                "type": "OBJECT",
-                "properties": {
-                    "categorical_variables": {
-                        "type": "ARRAY",
-                        "items": {"type": "STRING"}
-                    },
-                    "numeric_variables": {
-                        "type": "ARRAY",
-                        "items": {"type": "STRING"}
-                    }
-                },
-                "required": ["categorical_variables", "numeric_variables"]
-            }
-        }
-    }
-    
-    second_payload = {
-        "contents": [{"parts": [{"text": second_prompt}]}],
-        "generationConfig": {
-            "temperature": 0,
-            "response_mime_type": "application/json",
-            "response_schema": {
-                "type": "OBJECT",
-                "properties": {
-                    "columns": {
-                        "type": "ARRAY",
-                        "items": {
-                            "type": "OBJECT",
-                            "properties": {
-                                "name": {"type": "STRING"},
-                                "type": {"type": "STRING"},
-                                "description": {"type": "STRING"}
-                            },
-                            "required": ["name", "type", "description"]
-                        }
-                    }
-                },
-                "required": ["columns"]
-            }
-        }
-    }
-    
-    # Make API calls
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent?key={gemini_api_key}"
-    
-    first_response = requests.post(
-        api_url,
-        headers={"Content-Type": "application/json"},
-        json=first_payload
-    )
-    
-    second_response = requests.post(
-        api_url,
-        headers={"Content-Type": "application/json"},
-        json=second_payload
-    )
-    
-    if first_response.status_code == 200 and second_response.status_code == 200:
-        # Process first response
-        first_response_json = first_response.json()
-        if 'candidates' in first_response_json:
-            schema = first_response_json['candidates'][0]['content']['parts'][0]['text']
-            print("\n📄 First API Response (Variable Classification):")
-            print("-" * 50)
-            print(schema)
-            print("-" * 50)
-            
-            # Parse first schema
-            schema = json.loads(schema)
-            
-            # Process second response
-            second_response_json = second_response.json()
-            if 'candidates' in second_response_json:
-                pg_schema = second_response_json['candidates'][0]['content']['parts'][0]['text']
-                print("\n📄 Second API Response (PostgreSQL Schema):")
-                print("-" * 50)
-                print(pg_schema)
-                print("-" * 50)
-                
-                # Parse second schema
-                pg_schema = json.loads(pg_schema)
-                
-                # Update MASTER sheet with both results
-                master_sheet["B8"].value = str(schema['categorical_variables'])
-                master_sheet["B9"].value = str(schema['numeric_variables'])
-                
-                # Format PostgreSQL schema information
-                title_cell = master_sheet["B12"]
-                title_cell.value = "Column Schema Information"
-                title_range = master_sheet["B12:D12"]
-                title_range.color = "#A7D9AB"
-                
-                headers = ["Column Name", "PostgreSQL Type", "Description"]
-                master_sheet["B13"].value = headers
-                
-                schema_data = [[col["name"], col["type"], col["description"]] for col in pg_schema["columns"]]
-                master_sheet["B14"].value = schema_data
-                
-                # Format as table
-                table_range = master_sheet["B13"].resize(len(schema_data) + 1, len(headers))
-                master_sheet.tables.add(table_range)
-                
-                print("\n✅ Schema analysis completed successfully!")
-                return schema
-        else:
-            print(f"❌ API call failed with status {first_response.status_code} or {second_response.status_code}")
-            print("Error:", first_response.text, second_response.text)
-            return
-    else:
-        print(f"❌ API call failed with status {first_response.status_code} or {second_response.status_code}")
-        print("Error:", first_response.text, second_response.text)
-        return
+        for table in sheet.tables:
+            if table.name.lower() == name.lower():
+                return sheet, table
+    return None, None
 
-@script
-async def analyze_table_schema_openai(book: xw.Book):
-    """Analyze table schema using OpenAI API to identify categorical and numeric variables."""
-    print("⭐⭐⭐ STARTING OpenAI SCHEMA ANALYSIS ⭐⭐⭐")
-    
-    # Read MASTER sheet parameters
-    master_sheet = book.sheets["MASTER"]
-    table_name = master_sheet["B6"].value
-    openai_api_key = master_sheet["D4"].value
-    openai_model = master_sheet["D3"].value
-    
-    # Find table in workbook
-    table = None
+
+def delete_sheet(book: xw.Book, name: str):
     for sheet in book.sheets:
-        if table_name in [t.name for t in sheet.tables]:
-            table = sheet.tables[table_name]
-            break
-    
-    if not table:
-        return
-    
-    # Get sample data
-    sample_data = table.range[:10, :].options(pd.DataFrame, index=False).value
-    
-    print("\n📊 Sample Data Preview:")
-    print("-" * 50)
-    print(sample_data.head(3).to_string())
-    print("-" * 50)
-    
-    # First API call for categorical/numeric classification
-    first_payload = {
-        "model": openai_model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are an expert at analyzing data schemas. You will be given sample data and should identify categorical and numeric variables suitable for analysis."
-            },
-            {
-                "role": "user",
-                "content": f"""Analyze these rows from a dataset (including headers):
-                
-                {sample_data.to_string()}
-                
-                Task: Identify categorical and numeric variables for EDA.
-                Rules:
-                1. Exclude ID columns, meaningless numbers, and dates
-                2. Categorical variables: Text columns and numeric codes representing categories
-                3. Numeric variables: Continuous or discrete numbers suitable for statistical analysis"""
-            }
-        ],
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "variable_classification",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "categorical_variables": {
-                            "type": "array",
-                            "items": {"type": "string"}
-                        },
-                        "numeric_variables": {
-                            "type": "array",
-                            "items": {"type": "string"}
-                        }
-                    },
-                    "required": ["categorical_variables", "numeric_variables"],
-                    "additionalProperties": False
-                },
-                "strict": True
-            }
-        }
-    }
-    
-    # Second API call for PostgreSQL schema generation
-    second_payload = {
-        "model": openai_model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a PostgreSQL schema generator. You will analyze sample data and generate appropriate column definitions with detailed descriptions."
-            },
-            {
-                "role": "user",
-                "content": f"""Analyze this sample data and generate a PostgreSQL schema:
-                
-                {sample_data.to_string()}
-                
-                Requirements:
-                1. Use standard PostgreSQL types (TEXT, NUMERIC, DATE, TIMESTAMP. Don't use INTEGER)
-                2. Column names must be SQL-safe (alphanumeric and underscores only)
-                3. Use NUMERIC for all values that can have decimal points
-                4. Use DATE or TIMESTAMP for dates
-                5. Use TEXT when unsure
-                6. Provide detailed descriptions (up to 50 words) including data patterns, value types, and examples"""
-            }
-        ],
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "postgresql_schema",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "columns": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "type": {"type": "string"},
-                                    "description": {"type": "string"}
-                                },
-                                "required": ["name", "type", "description"],
-                                "additionalProperties": False
-                            }
-                        }
-                    },
-                    "required": ["columns"],
-                    "additionalProperties": False
-                },
-                "strict": True
-            }
-        }
-    }
-    
-    # Make API calls using httpx
-    async with httpx.AsyncClient() as client:
-        # First API call
-        first_response = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {openai_api_key}",
-                "Content-Type": "application/json"
-            },
-            json=first_payload,
-            timeout=30.0
-        )
-        
-        if first_response.status_code == 200:
-            first_response_json = first_response.json()
-            # Extract the actual data from the response
-            schema = json.loads(first_response_json['choices'][0]['message']['content'])
-            print("\n📄 First API Response (Variable Classification):")
-            print("-" * 50)
-            print(json.dumps(schema, indent=2))
-            print("-" * 50)
-            
-            # Second API call
-            second_response = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {openai_api_key}",
-                    "Content-Type": "application/json"
-                },
-                json=second_payload,
-                timeout=30.0
-            )
-            
-            if second_response.status_code == 200:
-                second_response_json = second_response.json()
-                # Extract the actual data from the response
-                pg_schema = json.loads(second_response_json['choices'][0]['message']['content'])
-                print("\n📄 Second API Response (PostgreSQL Schema):")
-                print("-" * 50)
-                print(json.dumps(pg_schema, indent=2))
-                print("-" * 50)
-                
-                # Update MASTER sheet with both results
-                master_sheet["B8"].value = str(schema['categorical_variables'])
-                master_sheet["B9"].value = str(schema['numeric_variables'])
-                
-                # Format PostgreSQL schema information
-                title_cell = master_sheet["B12"]
-                title_cell.value = "Column Schema Information"
-                title_range = master_sheet["B12:D12"]
-                title_range.color = "#A7D9AB"
-                
-                headers = ["Column Name", "PostgreSQL Type", "Description"]
-                master_sheet["B13"].value = headers
-                
-                schema_data = [[col["name"], col["type"], col["description"]] for col in pg_schema["columns"]]
-                master_sheet["B14"].value = schema_data
-                
-                # Format as table
-                table_range = master_sheet["B13"].resize(len(schema_data) + 1, len(headers))
-                master_sheet.tables.add(table_range)
-                
-                print("\n✅ Schema analysis completed successfully!")
-                return schema
-            else:
-                print(f"❌ Second API call failed with status {second_response.status_code}")
-                print("Error:", second_response.text)
-        else:
-            print(f"❌ First API call failed with status {first_response.status_code}")
-            print("Error:", first_response.text)
-    
-    return None
+        if sheet.name == name:
+            sheet.delete()
 
-@script
-def perform_eda(book: xw.Book):
-    """Perform comprehensive Exploratory Data Analysis (EDA) on the specified table."""
-    print("⭐⭐⭐ STARTING EDA ANALYSIS ⭐⭐⭐")
-    
+
+def read_settings(book: xw.Book) -> Tuple[str, str, str]:
+    c = book.sheets[CONTROL]
+    table = str(c[TABLE_CELL].value or "").strip()
+    gemini_model = str(c[GEMINI_MODEL_CELL].value or "").strip() or "gemini-flash-latest"
+    openrouter_model = str(c[OPENROUTER_MODEL_CELL].value or "").strip() or "openai/gpt-6-luna"
+    return table, gemini_model, openrouter_model
+
+
+def load_table(book: xw.Book, table_name: str) -> Optional[pd.DataFrame]:
+    _, table = find_table(book, table_name)
+    if table is None:
+        return None
+    return table.range.options(pd.DataFrame, index=False).value
+
+
+# -------------------------
+# Prompts and JSON schemas (the same two tasks for both providers)
+# -------------------------
+def classify_prompt(sample: pd.DataFrame) -> str:
+    return f"""Analyze these rows from a dataset (including headers):
+
+{sample.to_string(index=False)}
+
+Task: identify categorical and numeric variables for exploratory data analysis.
+Rules:
+1. Exclude ID columns, meaningless numbers and dates.
+2. Categorical: text columns and numeric codes that represent categories.
+3. Numeric: continuous or discrete numbers suitable for statistical analysis.
+Use the column names exactly as they appear in the header."""
+
+
+def schema_prompt(sample: pd.DataFrame) -> str:
+    return f"""You are a PostgreSQL schema generator. Analyze this sample data (first rows, with headers):
+
+{sample.to_string(index=False)}
+
+Requirements:
+1. Use standard PostgreSQL types: TEXT, NUMERIC, DATE, TIMESTAMP (do not use INTEGER).
+2. Column names must be SQL-safe (lowercase letters, digits and underscores).
+3. Use NUMERIC for any value that can have decimals, DATE or TIMESTAMP for dates, TEXT when unsure.
+4. Give each column a description of up to 50 words: what it holds, whether it looks continuous,
+   discrete, categorical, temporal or an ID, and example values from the data."""
+
+
+CLASSIFY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "categorical_variables": {"type": "array", "items": {"type": "string"}},
+        "numeric_variables": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["categorical_variables", "numeric_variables"],
+    "additionalProperties": False,
+}
+COLUMNS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "columns": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "type": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+                "required": ["name", "type", "description"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["columns"],
+    "additionalProperties": False,
+}
+
+
+def gemini_schema(schema: dict) -> dict:
+    """Gemini's response_schema uses the same shape without additionalProperties."""
+    out = {k: v for k, v in schema.items() if k != "additionalProperties"}
+    if "properties" in out:
+        out["properties"] = {k: gemini_schema(v) for k, v in out["properties"].items()}
+    if "items" in out:
+        out["items"] = gemini_schema(out["items"])
+    return out
+
+
+# -------------------------
+# API calls (pyfetch is built into Pyodide, no package to install)
+# -------------------------
+RETRY_STATUS = {429, 500, 502, 503, 504}   # busy or temporary errors: wait and try again
+
+
+async def post_json(url: str, headers: dict, payload: dict, tries: int = 3) -> dict:
+    for attempt in range(1, tries + 1):
+        r = await pyfetch(url, method="POST", headers={"Content-Type": "application/json", **headers},
+                          body=json.dumps(payload))
+        text = await r.text()
+        if r.ok or r.status not in RETRY_STATUS or attempt == tries:
+            break
+        print(f"⏳ HTTP {r.status}, retrying ({attempt}/{tries - 1}) ...")
+        await asyncio.sleep(3 * attempt)
+    if not r.ok:
+        try:
+            message = json.loads(text).get("error", {}).get("message", text)
+        except ValueError:
+            message = text
+        raise RuntimeError(f"HTTP {r.status}: {str(message)[:300]}")
+    return json.loads(text)
+
+
+async def ask_gemini(model: str, key: str, prompt: str, schema: dict) -> dict:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0, "response_mime_type": "application/json",
+                             "response_schema": gemini_schema(schema)},
+    }
+    data = await post_json(url, {"x-goog-api-key": key}, payload)
+    parts = data["candidates"][0]["content"]["parts"]
+    return json.loads("".join(p.get("text", "") for p in parts if not p.get("thought")))
+
+
+async def ask_openrouter(model: str, key: str, prompt: str, schema: dict, name: str) -> dict:
+    """OpenRouter: one key and the OpenAI-style API for models from many providers."""
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "response_format": {"type": "json_schema",
+                            "json_schema": {"name": name, "schema": schema, "strict": True}},
+        "provider": {"require_parameters": True},  # only route to providers that support the JSON schema
+    }
+    data = await post_json("https://openrouter.ai/api/v1/chat/completions",
+                           {"Authorization": f"Bearer {key}", "X-Title": "xlwings Lite AI Workflows"}, payload)
+    return json.loads(data["choices"][0]["message"]["content"])
+
+
+# -------------------------
+# Writing the SCHEMA sheet
+# -------------------------
+def keep_real_columns(names: list, df: pd.DataFrame) -> Tuple[list, list]:
+    """Match the LLM's column names to the table's real columns (case-insensitive)."""
+    lookup = {str(c).lower(): str(c) for c in df.columns}
+    kept, dropped = [], []
+    for n in names:
+        real = lookup.get(str(n).strip().lower())
+        if real and real not in kept:
+            kept.append(real)
+        elif not real:
+            dropped.append(str(n))
+    return kept, dropped
+
+
+def write_schema_sheet(book: xw.Book, table_name: str, source: str, classes: dict,
+                       columns: list, df: pd.DataFrame) -> Tuple[int, int, list]:
+    cats, d1 = keep_real_columns(classes["categorical_variables"], df)
+    nums, d2 = keep_real_columns(classes["numeric_variables"], df)
+    nums = [c for c in nums if c not in cats]
+    delete_sheet(book, SCHEMA_SHEET)
+    sh = book.sheets.add(name=SCHEMA_SHEET, after=book.sheets[CONTROL])
+    sh["A1"].value = f"Schema detected by {source}"
+    sh["A1"].font.bold = True
+    sh["A1"].font.size = 14
+    sh["A3"].value = [["Table", table_name],
+                      ["Categorical columns", ", ".join(cats)],
+                      ["Numeric columns", ", ".join(nums)]]
+    sh["A3:A5"].font.bold = True
+    sh["B4:B5"].color = "#FFFFCC"
+    sh["A6"].value = "Edit B4 / B5 (comma-separated column names) if you disagree with the LLM, then run 2. Run EDA."
+    sh["A6"].font.italic = True
+    schema_df = pd.DataFrame(columns)[["name", "type", "description"]]
+    schema_df.columns = ["Column Name", "PostgreSQL Type", "Description"]
+    sh["A8"].options(index=False).value = schema_df
+    sh.tables.add(source=sh["A8"].resize(len(schema_df) + 1, 3), name="T_SCHEMA")
+    return len(cats), len(nums), d1 + d2
+
+
+async def detect_schema(book: xw.Book, provider: str):
+    table_name, gemini_model, openrouter_model = read_settings(book)
+    key_name = "GEMINI_API_KEY" if provider == "Gemini" else "OPENROUTER_API_KEY"
+    key = os.getenv(key_name)
+    if not key:
+        set_status(book, f"❌ {key_name} is not set. In xlwings Lite open Settings > Environment Variables, "
+                         f"add {key_name} with scope Local, then restart xlwings Lite (see Step 1).", ok=False)
+        return
+    df = load_table(book, table_name)
+    if df is None:
+        set_status(book, f"❌ Table '{table_name}' not found. Type the name of an Excel table in {TABLE_CELL} "
+                         f"(the sample tables are RBICC and RESP).", ok=False)
+        return
+    sample = df.head(SAMPLE_ROWS)
+    model = gemini_model if provider == "Gemini" else openrouter_model
+    print(f"🤖 {provider} {model}: sending {len(sample)} rows of {table_name} ({df.shape[1]} columns)")
+    set_status(book, f"⏳ Waiting for {provider} ({model}). This can take up to a minute ...", ok=True)
+    await book.flush()
     try:
-        # Read parameters from MASTER sheet
-        master_sheet = book.sheets["MASTER"]
-        table_name = master_sheet["B6"].value
-        
-        # Get string values and convert them to lists
-        cat_vars_str = master_sheet["B8"].value
-        num_vars_str = master_sheet["B9"].value
-        
-        # Check if variables are properly set
-        if not cat_vars_str or not num_vars_str:
-            print("❌ ERROR: Missing variable classifications in MASTER sheet cells B8 and B9")
-            print("Please run schema analysis first")
-            return
-        
-        # Convert string representations of lists to actual lists
-        categorical_vars = [var.strip().strip("'") for var in cat_vars_str.strip('[]').split(',')]
-        numeric_vars = [var.strip().strip("'") for var in num_vars_str.strip('[]').split(',')]
-        
-        # Validate we have variables to analyze
-        if not categorical_vars and not numeric_vars:
-            print("❌ ERROR: No variables found for analysis")
-            return
-        
-        # Find table in workbook
-        table = None
-        
-        # First try to find the table directly
-        try:
-            table = book.tables[table_name]
-        except Exception:
-            # If not found, search in sheets
-            for sheet in book.sheets:
-                try:
-                    if table_name in [t.name for t in sheet.tables]:
-                        table = sheet.tables[table_name]
-                        break
-                except Exception:
-                    continue
-        
-        if not table:
-            print("❌ ERROR: Table not found")
-            return
-        
-        # Load data into DataFrame
-        df = table.range.options(pd.DataFrame, index=False).value
-        
-        # Create or get DISTROS and PLOT sheets
-        distros_sheet = None
-        plot_sheet = None
-        
-        # List of sheets to handle with table name suffix
-        sheets_to_handle = [f"DISTROS_{table_name}", f"PLOT_{table_name}"]
-        
-        # First, delete existing sheets if they exist
-        for sheet_name in sheets_to_handle:
-            try:
-                if sheet_name in [s.name for s in book.sheets]:
-                    book.sheets[sheet_name].delete()
-            except Exception:
-                continue
-        
-        # Then create new sheets
-        for sheet_name in sheets_to_handle:
-            try:
-                sheet = book.sheets.add(name=sheet_name)
-                if "DISTROS" in sheet_name:
-                    distros_sheet = sheet
-                else:
-                    plot_sheet = sheet
-            except Exception as e:
-                raise
-        
-        # Step 1: Numeric Variables Analysis
-        print("\n📊 Writing numeric statistics...")
-        current_row = 1
-        
-        # Calculate comprehensive statistics
-        stats_df = pd.DataFrame(index=['count', 'mean', 'std', 'min', '25%', '50%', '75%', 'max',
-                                     'skewness', 'kurtosis', 'variance',
-                                     '0%', '1%', '5%', '10%', '20%', '30%', '40%', '50%', '60%',
-                                     '70%', '80%', '90%', '95%', '99%', '100%',
-                                     'missing_count', 'missing_pct'],
-                              columns=numeric_vars)
-        
-        # Basic statistics
-        numeric_df = df[numeric_vars]
-        stats_df.loc['count'] = numeric_df.count()
-        stats_df.loc['mean'] = numeric_df.mean()
-        stats_df.loc['std'] = numeric_df.std()
-        stats_df.loc['min'] = numeric_df.min()
-        stats_df.loc['25%'] = numeric_df.quantile(0.25).values
-        stats_df.loc['50%'] = numeric_df.quantile(0.50).values
-        stats_df.loc['75%'] = numeric_df.quantile(0.75).values
-        stats_df.loc['max'] = numeric_df.max()
-        
-        # Additional statistics
-        stats_df.loc['skewness'] = numeric_df.skew()
-        stats_df.loc['kurtosis'] = numeric_df.kurtosis()
-        stats_df.loc['variance'] = numeric_df.var()
-        
-        # Percentiles
-        for p in [0, 1, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99, 100]:
-            stats_df.loc[f'{p}%'] = numeric_df.quantile(p/100).values
-        
-        # Missing values
-        stats_df.loc['missing_count'] = numeric_df.isnull().sum()
-        stats_df.loc['missing_pct'] = (numeric_df.isnull().sum() / len(numeric_df) * 100).round(2)
-        
-        # Write numeric statistics
-        try:
-            # Write and format header
-            title_cell = distros_sheet["A1"]
-            title_cell.value = "Numeric Variables Analysis"
-            title_range = distros_sheet["A1:C1"]
-            title_range.color = "#A7D9AB"
-            
-            # Write column headers
-            headers = ['Statistic'] + list(stats_df.columns)
-            distros_sheet["A2"].value = headers
-            
-            # Write data starting from row 3
-            stats_df.reset_index(inplace=True)
-            stats_df.rename(columns={'index': 'Statistic'}, inplace=True)
-            distros_sheet["A3"].value = stats_df.values.tolist()
-            
-            # Format as table including headers
-            stats_range = distros_sheet["A2"].resize(len(stats_df) + 1, len(stats_df.columns))
-            distros_sheet.tables.add(stats_range)
-            
-        except Exception:
-            pass
-        
-        current_row = len(stats_df) + 5  # Add extra space after numeric stats
-        
-        # Step 2: Categorical Variables Analysis
-        print("\n📊 Analyzing categorical variables...")
-        
-        for col in categorical_vars:
-            try:
-                value_counts = df[col].value_counts()
-                value_pcts = df[col].value_counts(normalize=True) * 100
-                
-                # Create a DataFrame with counts and percentages
-                cat_stats = pd.DataFrame({
-                    'Value': value_counts.index,
-                    'Count': value_counts.values,
-                    'Percentage': value_pcts.values.round(2)
-                })
-                
-                # Write and format category header
-                title_cell = distros_sheet[f"A{current_row}"]
-                title_cell.value = f"{col} Distribution"
-                title_range = distros_sheet[f"A{current_row}:C{current_row}"]
-                title_range.color = "#A7D9AB"
-                
-                # Write column headers
-                headers = ['Value', 'Count', 'Percentage']
-                distros_sheet[f"A{current_row + 1}"].value = headers
-                
-                # Write data starting from next row
-                distros_sheet[f"A{current_row + 2}"].value = cat_stats.values.tolist()
-                
-                # Format as table including headers
-                cat_range = distros_sheet[f"A{current_row + 1}"].resize(len(cat_stats) + 1, len(cat_stats.columns))
-                distros_sheet.tables.add(cat_range)
-                
-            except Exception:
-                pass
-            
-            current_row += len(cat_stats) + 4  # Add extra space between categories
-        
-        # Step 3: Correlation Matrix
-        print("\n📊 Calculating correlation matrix...")
-        current_row += 2
-        
-        try:
-            # Write and format correlation header
-            title_cell = distros_sheet[f"A{current_row}"]
-            title_cell.value = "Correlation Matrix"
-            title_range = distros_sheet[f"A{current_row}:C{current_row}"]
-            title_range.color = "#A7D9AB"
-            
-            # Calculate correlation matrix
-            corr_matrix = numeric_df.corr().round(2)
-            corr_df = corr_matrix.reset_index().rename(columns={'index': 'Variable'})
-            
-            # Write column headers
-            headers = ['Variable'] + list(corr_df.columns[1:])
-            distros_sheet[f"A{current_row + 1}"].value = headers
-            
-            # Write data starting from next row
-            distros_sheet[f"A{current_row + 2}"].value = corr_df.values.tolist()
-            
-            # Format as table including headers
-            corr_range = distros_sheet[f"A{current_row + 1}"].resize(len(corr_df) + 1, len(corr_df.columns))
-            distros_sheet.tables.add(corr_range)
-            
-        except Exception:
-            pass
-        
-        # Step 4: Visualizations
-        print("\n📊 Creating visualizations...")
-        
-        def plot_and_insert(fig, sheet, top_left_cell, name):
-            try:
-                temp_dir = tempfile.gettempdir()
-                temp_path = os.path.join(temp_dir, f"{name}.png")
-                fig.savefig(temp_path, dpi=150, bbox_inches='tight')
-                anchor_cell = sheet[top_left_cell]
-                sheet.pictures.add(temp_path, name=name, update=True, anchor=anchor_cell, format="png")
-            except Exception:
-                pass
-            finally:
-                plt.close(fig)
-        
-        # Write plots header
-        plot_sheet["A1"].value = "Data Visualizations"
-        
-        # Set default style parameters
-        plt.rcParams.update({
-            'figure.facecolor': 'white',
-            'axes.facecolor': 'white',
-            'axes.grid': True,
-            'grid.alpha': 0.3,
-            'axes.labelsize': 8,
-            'axes.titlesize': 10,
-            'xtick.labelsize': 8,
-            'ytick.labelsize': 8
-        })
-        
-        # 1. Correlation Heatmap
-        fig, ax = plt.subplots(figsize=(5, 3.5))
-        im = ax.imshow(corr_matrix, cmap='coolwarm', aspect='auto', vmin=-1, vmax=1)
-        
-        # Add correlation values
-        for i in range(len(corr_matrix)):
-            for j in range(len(corr_matrix)):
-                text = ax.text(j, i, f'{corr_matrix.iloc[i, j]:.2f}',
-                             ha='center', va='center', color='black',
-                             fontsize=8)
-        
-        # Customize appearance
-        ax.set_xticks(range(len(corr_matrix.columns)))
-        ax.set_yticks(range(len(corr_matrix.columns)))
-        ax.set_xticklabels(corr_matrix.columns, rotation=45, ha='right')
-        ax.set_yticklabels(corr_matrix.columns)
-        ax.set_title("Correlation Matrix", pad=10, fontsize=8, weight='bold')
-        
-        # Add colorbar
-        plt.colorbar(im, ax=ax, shrink=0.8)
-        plt.tight_layout()
-        plot_and_insert(fig, plot_sheet, "A2", "correlation_heatmap")
-        
-        # Start grid layout from row 20
-        base_row = 20
-        current_row = base_row
-        col_positions = ['A', 'E', 'I']
-        current_col_idx = 0
-        
-        # Function to get next plot position
-        def get_next_position():
-            nonlocal current_row, current_col_idx
-            position = f"{col_positions[current_col_idx]}{current_row}"
-            current_col_idx += 1
-            if current_col_idx >= len(col_positions):
-                current_col_idx = 0
-                current_row += 15
-            return position
-        
-        # 2. Box Plots for Numeric Variables
-        for col in numeric_vars:
-            fig, ax = plt.subplots(figsize=(3, 2.5))
-            ax.boxplot(numeric_df[col].dropna(), vert=True, widths=0.7,
-                      patch_artist=True,
-                      boxprops=dict(facecolor='lightblue', color='gray'),
-                      whiskerprops=dict(color='gray'),
-                      capprops=dict(color='gray'),
-                      medianprops=dict(color='red'))
-            
-            ax.set_title(col, pad=10, fontsize=8, weight='bold')
-            ax.set_ylabel(col, fontsize=8)
-            ax.grid(True, alpha=0.3)
-            plt.tight_layout()
-            plot_and_insert(fig, plot_sheet, get_next_position(), f"box_{col}")
-        
-        # Add some space between different types of plots
-        if current_col_idx != 0:
-            current_row += 15
-            current_col_idx = 0
-        
-        # 3. Distribution Plots for Numeric Variables
-        for col in numeric_vars:
-            fig, ax = plt.subplots(figsize=(3, 2.5))
-            ax.hist(numeric_df[col].dropna(), bins=30, density=True, alpha=0.7,
-                   color='lightblue', edgecolor='gray')
-            
-            # Add KDE
-            kde = stats.gaussian_kde(numeric_df[col].dropna())
-            x_range = np.linspace(numeric_df[col].min(), numeric_df[col].max(), 100)
-            ax.plot(x_range, kde(x_range), 'r-', lw=1.5)
-            
-            ax.set_title(col, pad=10, fontsize=8, weight='bold')
-            ax.set_xlabel(col, fontsize=8)
-            ax.set_ylabel('Density', fontsize=8)
-            ax.grid(True, alpha=0.3)
-            plt.tight_layout()
-            plot_and_insert(fig, plot_sheet, get_next_position(), f"dist_{col}")
-        
-        # Add some space between different types of plots
-        if current_col_idx != 0:
-            current_row += 15
-            current_col_idx = 0
-        
-        # 4. Bar Plots for Categorical Variables
-        for col in categorical_vars:
-            fig, ax = plt.subplots(figsize=(3, 2.5))
-            value_counts = df[col].value_counts()
-            
-            bars = ax.bar(range(len(value_counts)), value_counts.values,
-                         color='lightblue', edgecolor='gray', alpha=0.7)
-            
-            ax.set_title(col, pad=10, fontsize=8, weight='bold')
-            ax.set_xticks(range(len(value_counts)))
-            ax.set_xticklabels(value_counts.index, rotation=45, ha='right')
-            ax.set_ylabel('Count', fontsize=8)
-            ax.grid(True, alpha=0.3)
-            
-            # Add value labels on top of bars
-            for bar in bars:
-                height = bar.get_height()
-                ax.text(bar.get_x() + bar.get_width()/2., height,
-                       f'{int(height)}',
-                       ha='center', va='bottom', fontsize=8)
-            
-            plt.tight_layout()
-            plot_and_insert(fig, plot_sheet, get_next_position(), f"bar_{col}")
-        
-        print("\n✅ EDA analysis completed successfully!")
-        print("\n⭐⭐⭐ ENDING EDA ANALYSIS ⭐⭐⭐")
-        
+        if provider == "Gemini":
+            classes, cols = await asyncio.gather(
+                ask_gemini(model, key, classify_prompt(sample), CLASSIFY_SCHEMA),
+                ask_gemini(model, key, schema_prompt(sample), COLUMNS_SCHEMA))
+        else:
+            classes, cols = await asyncio.gather(
+                ask_openrouter(model, key, classify_prompt(sample), CLASSIFY_SCHEMA, "variable_classification"),
+                ask_openrouter(model, key, schema_prompt(sample), COLUMNS_SCHEMA, "postgresql_schema"))
     except Exception as e:
-        print(f"❌ ERROR during EDA: {str(e)}")
-        print(traceback.format_exc())
-        return 
+        print(f"❌ {e}")
+        set_status(book, f"❌ {provider} call failed ({model}): {e}", ok=False)
+        return
+    print("📄 Variable classification:", json.dumps(classes))
+    print("📄 PostgreSQL schema:", json.dumps(cols)[:2000])
+    n_cat, n_num, dropped = write_schema_sheet(book, table_name, f"{provider} ({model}) for table {table_name}",
+                                               classes, cols["columns"], df)
+    msg = (f"✅ {provider} ({model}): {n_cat} categorical, {n_num} numeric, {len(cols['columns'])} columns "
+           f"described. See the SCHEMA sheet, then run 2. Run EDA.")
+    if dropped:
+        msg += f" Ignored names not in the table: {', '.join(dropped)}."
+    print(msg)
+    set_status(book, msg, ok=True)
+    book.sheets[SCHEMA_SHEET].activate()
+
+
+@script(name="1a. Detect Schema (Gemini)", button="[run_gemini_btn]MASTER!C17")
+async def analyze_table_schema_gemini(book: xw.Book):
+    """Ask Gemini for the column classification and a PostgreSQL schema."""
+    await detect_schema(book, "Gemini")
+
+
+@script(name="1b. Detect Schema (OpenRouter)", button="[run_openrouter_btn]MASTER!C19")
+async def analyze_table_schema_openrouter(book: xw.Book):
+    """Ask a model on OpenRouter for the column classification and a PostgreSQL schema."""
+    await detect_schema(book, "OpenRouter")
+
+
+# -------------------------
+# EDA (pure pandas: takes and returns DataFrames)
+# -------------------------
+def parse_columns(text: Any) -> list:
+    text = str(text or "").strip().strip("[]")
+    return [c.strip().strip("'\"") for c in text.split(",") if c.strip().strip("'\"")]
+
+
+def numeric_stats(num: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    def add(label: str, values: pd.Series):
+        rows.append({"Statistic": label, **{c: values[c] for c in num.columns}})
+    add("count", num.count())
+    add("missing", num.isna().sum())
+    add("missing %", (num.isna().mean() * 100).round(2))
+    add("mean", num.mean())
+    add("std", num.std())
+    add("variance", num.var())
+    add("skewness", num.skew())
+    add("kurtosis", num.kurtosis())
+    for p in [0, 1, 5, 10, 25, 50, 75, 90, 95, 99, 100]:
+        add({0: "min", 50: "median", 100: "max"}.get(p, f"p{p}"), num.quantile(p / 100))
+    return pd.DataFrame(rows)
+
+
+def as_labels(s: pd.Series) -> pd.Series:
+    """Category values as text; whole-number codes read from Excel as 1.0 show as 1."""
+    num = pd.to_numeric(s, errors="coerce")
+    if s.notna().any() and num.notna().sum() == s.notna().sum() and (num.dropna() % 1 == 0).all():
+        return num.astype("Int64").astype(str).replace("<NA>", "(blank)")
+    return s.fillna("(blank)").astype(str)
+
+
+def category_counts(s: pd.Series, top: int = 50) -> pd.DataFrame:
+    counts = as_labels(s).value_counts()
+    if len(counts) > top:
+        counts = pd.concat([counts.iloc[:top], pd.Series({"(all other values)": counts.iloc[top:].sum()})])
+    return pd.DataFrame({"Value": counts.index, "Count": counts.values,
+                         "Percent": (counts.values / len(s) * 100).round(2)})
+
+
+def density(s: pd.Series, x: np.ndarray) -> np.ndarray:
+    """Gaussian kernel density (Scott's rule), the smooth line drawn over each histogram."""
+    v = s.to_numpy(dtype=float)
+    h = v.std(ddof=1) * len(v) ** (-0.2)
+    z = (x[:, None] - v[None, :]) / h
+    return np.exp(-0.5 * z ** 2).sum(axis=1) / (len(v) * h * np.sqrt(2 * np.pi))
+
+
+def write_block(sheet: xw.Sheet, row: int, title: str, df: pd.DataFrame) -> int:
+    """Title row + a table. Returns the next free row."""
+    sheet[f"A{row}"].value = title
+    sheet[f"A{row}"].font.bold = True
+    sheet[f"A{row}"].resize(1, max(3, df.shape[1])).color = HEADER_FILL
+    sheet[f"A{row + 1}"].options(index=False).value = df
+    sheet.tables.add(source=sheet[f"A{row + 1}"].resize(len(df) + 1, df.shape[1]))
+    return row + len(df) + 4
+
+
+@script(name="2. Run EDA", button="[run_eda_btn]MASTER!C24")
+def perform_eda(book: xw.Book):
+    """Statistics, distributions, correlations and charts for the columns on the SCHEMA sheet."""
+    names = [s.name for s in book.sheets]
+    if SCHEMA_SHEET not in names:
+        set_status(book, "❌ No SCHEMA sheet yet. Run 1a or 1b first.", ok=False)
+        return
+    sch = book.sheets[SCHEMA_SHEET]
+    table_name = str(sch["B3"].value or "").strip()
+    df = load_table(book, table_name)
+    if df is None:
+        set_status(book, f"❌ Table '{table_name}' (SCHEMA!B3) not found in this workbook.", ok=False)
+        return
+    cats, bad1 = keep_real_columns(parse_columns(sch["B4"].value), df)
+    nums, bad2 = keep_real_columns(parse_columns(sch["B5"].value), df)
+    if bad1 or bad2:
+        set_status(book, f"❌ Not columns of {table_name}: {', '.join(bad1 + bad2)}. Fix SCHEMA!B4:B5.", ok=False)
+        return
+    if not cats and not nums:
+        set_status(book, "❌ SCHEMA!B4 and B5 are both empty.", ok=False)
+        return
+    print(f"📊 EDA on {table_name}: {len(df):,} rows, {len(nums)} numeric, {len(cats)} categorical")
+    num = df[nums].apply(pd.to_numeric, errors="coerce") if nums else pd.DataFrame()
+
+    # Calculate everything first, then write.
+    blocks = []
+    if nums:
+        blocks.append(("Numeric variables", numeric_stats(num)))
+    for c in cats:
+        blocks.append((f"{c}: distribution", category_counts(df[c])))
+    corr = num.corr().round(2) if len(nums) > 1 else None
+    if corr is not None:
+        blocks.append(("Correlation matrix", corr.reset_index().rename(columns={"index": "Variable"})))
+
+    distros_name, plot_name = f"DISTROS_{table_name}"[:31], f"PLOT_{table_name}"[:31]
+    for n in (distros_name, plot_name):
+        delete_sheet(book, n)
+    distros = book.sheets.add(name=distros_name, after=book.sheets[SCHEMA_SHEET])
+    plots = book.sheets.add(name=plot_name, after=distros)
+    row = 1
+    for title, block in blocks:
+        row = write_block(distros, row, title, block)
+
+    plt.rcParams.update({"figure.facecolor": "white", "axes.grid": True, "grid.alpha": 0.3,
+                         "axes.titlesize": 9, "axes.labelsize": 8, "xtick.labelsize": 7, "ytick.labelsize": 7})
+    plots["A1"].value = f"Charts for {table_name}"
+    plots["A1"].font.bold = True
+    slots = [f"{col}{r}" for r in range(20, 2000, 16) for col in ("A", "F", "K")]
+
+    def place(fig, anchor: str, name: str):
+        fig.tight_layout()
+        plots.pictures.add(fig, name=name, update=True, anchor=plots[anchor])
+        plt.close(fig)
+
+    if corr is not None:
+        fig, ax = plt.subplots(figsize=(6, 4))
+        im = ax.imshow(corr.values, cmap="coolwarm", vmin=-1, vmax=1, aspect="auto")
+        for i in range(len(corr)):
+            for j in range(len(corr)):
+                ax.text(j, i, f"{corr.iloc[i, j]:.2f}", ha="center", va="center", fontsize=6)
+        ax.set_xticks(range(len(corr)), corr.columns, rotation=45, ha="right")
+        ax.set_yticks(range(len(corr)), corr.columns)
+        ax.set_title("Correlation matrix", weight="bold")
+        fig.colorbar(im, ax=ax, shrink=0.8)
+        place(fig, "A3", "correlation_heatmap")
+    i = 0
+    for c in nums:
+        s = num[c].dropna()
+        if s.empty:
+            continue
+        fig, ax = plt.subplots(figsize=(3.2, 2.6))
+        ax.hist(s, bins=30, density=True, color="#9DC3E6", edgecolor="#5B7A99")
+        if s.nunique() > 1:
+            x = np.linspace(s.min(), s.max(), 200)
+            ax.plot(x, density(s, x), color=BLUE, lw=1.5)
+        ax.set_title(c, weight="bold")
+        place(fig, slots[i], f"dist_{c}")
+        i += 1
+        fig, ax = plt.subplots(figsize=(3.2, 2.6))
+        ax.boxplot(s, widths=0.6, patch_artist=True, boxprops=dict(facecolor="#9DC3E6"),
+                   medianprops=dict(color=BLUE, lw=2))
+        ax.set_title(c, weight="bold")
+        place(fig, slots[i], f"box_{c}")
+        i += 1
+    for c in cats:
+        counts = as_labels(df[c]).value_counts().head(15)
+        fig, ax = plt.subplots(figsize=(3.2, 2.6))
+        ax.bar(range(len(counts)), counts.values, color="#9DC3E6", edgecolor="#5B7A99")
+        ax.set_xticks(range(len(counts)), counts.index, rotation=45, ha="right")
+        ax.set_title(c + (" (top 15)" if df[c].nunique() > 15 else ""), weight="bold")
+        place(fig, slots[i], f"bar_{c}")
+        i += 1
+
+    msg = (f"✅ EDA done for {table_name}: {len(nums)} numeric, {len(cats)} categorical, {i} charts. "
+           f"See {distros_name} and {plot_name}.")
+    print(msg)
+    set_status(book, msg, ok=True)
+    distros.activate()

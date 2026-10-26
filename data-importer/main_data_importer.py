@@ -1,75 +1,47 @@
-# xlwings Lite - Secure Data Downloader with Token Access + Raw Import
+# xlwings Lite Data Importer v2 - import files from links or with your own tokens, into DuckDB or as-is
 #
 # =============================================================================
-# CODE MAP (for AI navigation)
+# CODE MAP
 # =============================================================================
-# Search for these markers to find sections:
 #   === SECTION: IMPORTS ===
-#   === SECTION: OAUTH ===
+#   === SECTION: OAUTH ===            Dropbox / Google Drive access tokens from refresh tokens
 #   === SECTION: HELPERS ===
-#   === SECTION: URL_ROUTING ===
-#   === SECTION: DATA_PROFILING ===
-#   === SECTION: SCHEMA_DISPLAY ===
-#   === SECTION: SCRIPT_TOKEN_ACCESS ===
-#   === SECTION: SCRIPT_SHARELINK ===
-#   === SECTION: SCRIPT_RAW_IMPORT ===
+#   === SECTION: URL_ROUTING ===       proxy, Google Drive / Dropbox link conversion, file type detection
+#   === SECTION: DATA_PROFILING ===    column statistics in DuckDB
+#   === SECTION: SCHEMA_DISPLAY ===    result sheets PARQUET / CSV / JSON / DUCKDB
+#   === SECTION: SHEET_LAYOUT ===      input cells and status messages
+#   === SECTION: DOWNLOAD ===
+#   === SECTION: PROCESS ===
+#   === SECTION: SCRIPTS ===           the four import buttons
 #   === SECTION: REMOTE_LOADER ===
-#   === SECTION: SCRIPT_RUN_STATS ===
+#   === SECTION: SCRIPT_RUN_STATS ===  sample statistics (cricket / IMDB)
 #
 # =============================================================================
-# SCRIPT FUNCTIONS SUMMARY
+# SCRIPTS (buttons)
 # =============================================================================
-# @script import_via_token      - TOKEN_ACCESS sheet (Dropbox/GDrive/GitHub OAuth)
-# @script import_via_sharelink  - SHARE_LINK_ACCESS sheet (public/private URLs)
-# @script import_raw_sharelink  - SHARE_LINK_ACCESS sheet (raw file download)
-# @script import_raw_token      - TOKEN_ACCESS sheet (raw file download)
-# @script run_stats             - Auto-detect and run stats module
-#
-# =============================================================================
-# SHEET INPUT LAYOUTS
-# =============================================================================
-#
-# SHARE_LINK_ACCESS / MASTER sheet:
-#   B5  - Source URL (GitHub, Google Drive, Dropbox, direct URLs)
-#   B7  - Raw Mode Flag (1 = raw download, 0 or empty = process to DuckDB)  (NEW)
-#   B8  - Output Filename with extension (required when B7=1)                (NEW)
-#   B12 - Private Repo Flag (1 = use auth proxy for GitHub, 0 = public)
-#   B17 - Auth Proxy URL (required when B12=1)
-#   D8  - Output: Saved file path (written by import_raw_sharelink)         (NEW)
-#
-# TOKEN_ACCESS sheet (processed mode):
-#   B5  - Storage Provider (dropdown: "Dropbox", "Google Drive", "GitHub")
-#   B6  - File Path/ID (format depends on provider)
-#   B7  - Auth Proxy URL (optional, only for GitHub private repos)
-#
-# TOKEN_ACCESS sheet (raw mode - import_raw_token):                            (NEW)
-#   B5  - Storage Provider (dropdown: "Dropbox", "Google Drive", "GitHub")
-#   B6  - File Path/ID (format depends on provider)
-#   B7  - Auth Proxy URL (optional, only for GitHub private repos)
-#   B9  - Raw Mode Flag (1 = raw download)                                     (NEW)
-#   B10 - Output Filename with extension (required when B9=1)                  (NEW)
-#   D10 - Output: Saved file path (written by import_raw_token)                (NEW)
+#   1. Link: Import to DuckDB    SHARE_LINK_ACCESS: B5 link
+#   2. Link: Download As-Is      SHARE_LINK_ACCESS: B5 link, B8 file name, B9 folder
+#   3. Token: Import to DuckDB   TOKEN_ACCESS: B5 provider, B6 path / ID / URL, B7 auth proxy (GitHub releases)
+#   4. Token: Download As-Is     TOKEN_ACCESS: same, plus B9 file name, B10 folder
+#   5. Run Stats (sample data)   uses the last imported file (cricket or IMDB samples)
+#   Messages go to B12 on each sheet (blue = done, red = error).
 #
 # =============================================================================
-# ENVIRONMENT VARIABLES
+# ENVIRONMENT VARIABLES (token access only; xlwings Lite: Settings > Environment Variables, scope Local)
 # =============================================================================
-# For Dropbox:   DROPBOX.REFRESH_TOKEN, DROPBOX.APP_KEY, DROPBOX.APP_SECRET
-# For GDrive:    GDRIVE.REFRESH_TOKEN, GDRIVE.CLIENT_ID, GDRIVE.CLIENT_SECRET
-# For GitHub:    GITHUB.PAT (Personal Access Token with repo scope)
+#   Dropbox:      DROPBOX.REFRESH_TOKEN, DROPBOX.APP_KEY, DROPBOX.APP_SECRET
+#   Google Drive: GDRIVE.REFRESH_TOKEN, GDRIVE.CLIENT_ID, GDRIVE.CLIENT_SECRET
+#   GitHub:       GITHUB.PAT (personal access token with read access to the repo)
 #
-# =============================================================================
-# SUPPORTED FILE TYPES (processed mode)
-# =============================================================================
-# .parquet, .duckdb, .csv, .tsv, .txt, .pipe, .psv, .json
-#
-# RAW MODE: Any file type - user specifies filename with extension
-#
+# Data files: .parquet, .duckdb, .sqlite / .db, .csv, .tsv, .txt, .pipe, .psv, .json
+# As-Is download: any file type.
+
 
 # === SECTION: IMPORTS ===
 import xlwings as xw
 from xlwings import script
 import pandas as pd
-from typing import Tuple, Optional
+from typing import Any, Tuple, Optional
 from pyodide.http import pyfetch
 import duckdb
 import tempfile
@@ -85,15 +57,6 @@ import json
 
 _dropbox_token = None
 _gdrive_token = None
-
-
-def _ensure_requests_patched():
-    """Patch requests library for Pyodide/browser environment."""
-    try:
-        import pyodide_http
-        pyodide_http.patch_all()
-    except ImportError:
-        pass
 
 
 async def get_dropbox_token() -> str:
@@ -113,9 +76,6 @@ async def get_dropbox_token() -> str:
         raise ValueError("DROPBOX.APP_KEY not found in environment variables")
     if not app_secret:
         raise ValueError("DROPBOX.APP_SECRET not found in environment variables")
-
-    print(f"   Dropbox App Key: {app_key}")
-    print(f"   Refresh Token: {refresh_token[:20]}...")
 
     print("   Getting Dropbox access token...")
     token_data = (
@@ -138,7 +98,7 @@ async def get_dropbox_token() -> str:
 
     token_json = await response.json()
     _dropbox_token = token_json["access_token"]
-    print(f"   Access token obtained: {_dropbox_token[:20]}...")
+    print("   Dropbox access token obtained")
 
     return _dropbox_token
 
@@ -161,9 +121,6 @@ async def get_gdrive_token() -> str:
     if not client_secret:
         raise ValueError("GDRIVE.CLIENT_SECRET not found in environment variables")
 
-    print(f"   Google Client ID: {client_id[:30]}...")
-    print(f"   Refresh Token: {refresh_token[:20]}...")
-
     print("   Getting Google Drive access token...")
     token_data = (
         f"grant_type=refresh_token"
@@ -185,7 +142,7 @@ async def get_gdrive_token() -> str:
 
     token_json = await response.json()
     _gdrive_token = token_json["access_token"]
-    print(f"   Access token obtained: {_gdrive_token[:20]}...")
+    print("   Google Drive access token obtained")
 
     return _gdrive_token
 
@@ -195,12 +152,18 @@ async def get_gdrive_token() -> str:
 # HELPER FUNCTIONS
 # =============================================================================
 
-def find_table_in_workbook(book: xw.Book, table_name: str) -> Tuple[Optional[xw.Sheet], any]:
+def find_table_in_workbook(book: xw.Book, table_name: str) -> Tuple[Optional[xw.Sheet], Any]:
     """Searches all sheets for a table and returns both the sheet and table objects."""
     for sheet in book.sheets:
         if table_name in sheet.tables:
             return sheet, sheet.tables[table_name]
     return None, None
+
+
+def scalar(conn, query: str):
+    """First value of the first row of a query."""
+    row = conn.execute(query).fetchone()
+    return row[0] if row else None
 
 
 def ensure_sheet_exists(book: xw.Book, sheet_name: str) -> xw.Sheet:
@@ -242,7 +205,7 @@ def get_last_state_path() -> str:
     return os.path.join(tempfile.gettempdir(), "last_import_state.json")
 
 
-def save_last_import_state(source_sheet: str, source_url: str, file_type: str, file_path: str = None) -> None:
+def save_last_import_state(source_sheet: str, source_url: str, file_type: str, file_path: Optional[str] = None) -> None:
     """
     Saves the state of the last import operation.
     This allows run_stats and test functions to know what was last imported.
@@ -679,7 +642,7 @@ def display_parquet_schema(book: xw.Book, source_url: str, file_size_mb: float,
         conn = duckdb.connect()
 
         count_query = f"SELECT COUNT(*) FROM '{temp_parquet_path}'"
-        row_count = conn.execute(count_query).fetchone()[0]
+        row_count = scalar(conn, count_query)
         print(f"   Total rows: {row_count:,}")
 
         print("   Generating column statistics...")
@@ -770,7 +733,7 @@ def display_parquet_schema(book: xw.Book, source_url: str, file_size_mb: float,
 
 def display_delimited_schema(book: xw.Book, source_url: str, file_size_mb: float,
                              download_minutes: int, download_seconds: int, save_seconds: int,
-                             delimiter: str, file_type: str) -> bool:
+                             delimiter: Optional[str], file_type: str) -> bool:
     """Imports delimited file into DuckDB for unified querying with data profiling."""
     temp_csv_path = get_delimited_temp_path()
     duck_db_path = get_duckdb_temp_path()
@@ -797,7 +760,7 @@ def display_delimited_schema(book: xw.Book, source_url: str, file_size_mb: float
         """
         conn.execute(create_table_query)
 
-        row_count = conn.execute("SELECT COUNT(*) FROM imported_data").fetchone()[0]
+        row_count = scalar(conn, "SELECT COUNT(*) FROM imported_data")
 
         print("   Generating column statistics...")
         stats_df = generate_column_stats(conn, "imported_data", is_file=False)
@@ -916,7 +879,7 @@ def display_json_schema(book: xw.Book, source_url: str, file_size_mb: float,
         """
         conn.execute(create_table_query)
 
-        row_count = conn.execute("SELECT COUNT(*) FROM imported_data").fetchone()[0]
+        row_count = scalar(conn, "SELECT COUNT(*) FROM imported_data")
 
         print("   Generating column statistics...")
         stats_df = generate_column_stats(conn, "imported_data", is_file=False)
@@ -1054,6 +1017,18 @@ def display_sqlite_schema(book: xw.Book, source_url: str, file_size_mb: float,
         duck_conn = duckdb.connect(duck_db_path)
         for table_name, df in table_dataframes.items():
             duck_conn.execute(f'CREATE TABLE "{table_name}" AS SELECT * FROM df')
+
+        # Generate column statistics for each table
+        table_stats: dict[str, Any] = {}
+        for table_name in table_names:
+            print(f"   Generating stats for table: {table_name}...")
+            try:
+                stats_df = generate_column_stats(duck_conn, table_name, is_file=False)
+                table_stats[table_name] = stats_df
+            except Exception as e:
+                print(f"   Warning: Could not generate stats for {table_name}: {e}")
+                table_stats[table_name] = None
+
         duck_conn.close()
 
         duckdb_size_mb = os.path.getsize(duck_db_path) / (1024 * 1024)
@@ -1101,14 +1076,40 @@ def display_sqlite_schema(book: xw.Book, source_url: str, file_size_mb: float,
 
         current_row += schema_df.shape[0] + 3
 
-        for table_name, sample_df in sample_data.items():
-            output_sheet.range(f"A{current_row}").value = f"SAMPLE: {table_name}"
+        for table_name in table_names:
+            # Table header
+            output_sheet.range(f"A{current_row}").value = f"TABLE: {table_name}"
             output_sheet.range(f"A{current_row}").font.bold = True
-            output_sheet.range(f"A{current_row}").font.size = 11
-            output_sheet.range(f"A{current_row}").color = '#E2EFDA'
-            current_row += 1
+            output_sheet.range(f"A{current_row}").font.size = 12
+            output_sheet.range(f"A{current_row}").color = '#FFC000'
+            current_row += 2
 
-            if not sample_df.empty:
+            # Column statistics
+            if table_name in table_stats and table_stats[table_name] is not None:
+                output_sheet.range(f"A{current_row}").value = "DATA PROFILE (Column Statistics)"
+                output_sheet.range(f"A{current_row}").font.bold = True
+                output_sheet.range(f"A{current_row}").font.size = 11
+                current_row += 1
+
+                stats_for_table = table_stats[table_name]
+                output_sheet.range(f"A{current_row}").options(index=False).value = stats_for_table
+
+                stats_header = output_sheet.range(f"A{current_row}").resize(1, stats_for_table.shape[1])
+                stats_header.color = '#4472C4'
+                stats_header.font.color = '#FFFFFF'
+                stats_header.font.bold = True
+
+                current_row += stats_for_table.shape[0] + 2
+
+            # Sample data
+            sample_df = sample_data.get(table_name)
+            if sample_df is not None and not sample_df.empty:
+                output_sheet.range(f"A{current_row}").value = "SAMPLE DATA (First 3 Rows)"
+                output_sheet.range(f"A{current_row}").font.bold = True
+                output_sheet.range(f"A{current_row}").font.size = 11
+                output_sheet.range(f"A{current_row}").color = '#E2EFDA'
+                current_row += 1
+
                 output_sheet.range(f"A{current_row}").options(index=False).value = sample_df
 
                 sample_header = output_sheet.range(f"A{current_row}").resize(1, sample_df.shape[1])
@@ -1177,11 +1178,11 @@ def display_duckdb_schema(book: xw.Book, source_url: str, file_size_mb: float,
         print(f"   Found {len(table_names)} tables: {table_names}")
 
         table_info = []
-        table_stats = {}
+        table_stats: dict[str, Any] = {}
         sample_data = {}
 
         for table_name in table_names:
-            row_count = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+            row_count = scalar(conn, f'SELECT COUNT(*) FROM "{table_name}"')
             describe_result = conn.execute(f'DESCRIBE "{table_name}"').fetchall()
             table_info.append({
                 'Table Name': str(table_name),
@@ -1317,1004 +1318,354 @@ def display_duckdb_schema(book: xw.Book, source_url: str, file_size_mb: float,
         return False
 
 
-# === SECTION: SCRIPT_TOKEN_ACCESS ===
+
+# === SECTION: SHEET_LAYOUT ===
 # =============================================================================
-# SCRIPT: IMPORT DATA FROM TOKEN ACCESS
+# INPUT CELLS AND STATUS MESSAGES
 # =============================================================================
 
-@script
-async def import_via_token(book: xw.Book):
-    """
-    Import data using OAuth tokens (Dropbox, Google Drive) or PAT (GitHub).
+LINK_SHEET = "SHARE_LINK_ACCESS"
+TOKEN_SHEET = "TOKEN_ACCESS"
+# SHARE_LINK_ACCESS: B5 link, B8 file name (as-is), B9 folder (as-is), B12 status
+# TOKEN_ACCESS: B5 provider, B6 path / ID / URL, B7 auth proxy, B9 file name (as-is), B10 folder (as-is), B12 status
+STATUS_CELL = {LINK_SHEET: "B12", TOKEN_SHEET: "B12"}
+RESULT_SHEET = {'parquet': 'PARQUET', 'duckdb': 'DUCKDB', 'json': 'JSON'}
 
-    Reads from TOKEN_ACCESS sheet:
-        B5 - Storage Provider (dropdown: "Dropbox", "Google Drive", "GitHub")
-        B6 - File Path/ID (format depends on provider)
-        B7 - Auth Proxy URL (optional, only for GitHub private repos)
-    """
-    print("=" * 60)
-    print("TOKEN ACCESS DATA IMPORTER")
-    print("Supports: Dropbox OAuth | Google Drive OAuth | GitHub PAT")
-    print("=" * 60)
 
-    print("\n   Cleaning up previous imports...")
-    cleanup_count = 0
+def cell_text(sheet: xw.Sheet, address: str) -> str:
+    """Cell value as stripped text ('' when empty)."""
+    value = sheet[address].value
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return str(value).strip()
 
+
+def set_status(sheet: xw.Sheet, message: str, ok: bool = True) -> None:
+    """Writes a message in the sheet's status cell: blue when done, red on error."""
+    cell = sheet[STATUS_CELL[sheet.name]]
+    cell.value = message
+    cell.font.color = '#1F4E79' if ok else '#C00000'
+    cell.font.bold = True
+
+
+def fail(sheet: xw.Sheet, message: str) -> None:
+    print(f"\nERROR: {message}")
+    set_status(sheet, f"ERROR: {message}", ok=False)
+
+
+def clear_previous_imports() -> None:
+    """Removes the temp files of the previous import, so run_stats never reads an old file."""
     for temp_path in [get_parquet_temp_path(), get_duckdb_temp_path(),
                       get_delimited_temp_path(), get_json_temp_path()]:
         if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-                cleanup_count += 1
-            except Exception as e:
-                print(f"   Warning: Could not remove {os.path.basename(temp_path)}: {e}")
+            os.remove(temp_path)
 
-    if cleanup_count > 0:
-        print(f"   Removed {cleanup_count} previous temp file(s)")
+
+def size_text(n_bytes: int) -> str:
+    return f"{n_bytes / (1024 * 1024):.2f} MB" if n_bytes >= 100 * 1024 else f"{n_bytes / 1024:.1f} KB"
+
+
+def format_duration(seconds: float) -> Tuple[int, int]:
+    return int(seconds // 60), int(seconds % 60)
+
+
+# === SECTION: DOWNLOAD ===
+# =============================================================================
+# DOWNLOAD: SHAREABLE LINK OR TOKEN
+# =============================================================================
+
+async def download_link(url: str) -> Tuple[bytes, str, str]:
+    """Downloads a public / shareable link. Google Drive, Dropbox and GitHub Releases go through
+    the CORS proxy. Returns (bytes, final url, Content-Disposition header)."""
+    url, converted = convert_google_drive_url(url)
+    if converted:
+        print("   Google Drive link converted to a direct download link")
+    url, converted = convert_dropbox_url(url)
+    if converted:
+        print("   Dropbox link converted to a direct download link (dl=1)")
+
+    if needs_proxy(url):
+        fetch_url = build_public_proxy_url(url)
+        print(f"   Via CORS proxy: {PUBLIC_PROXY_URL}")
     else:
-        print(f"   No previous temp files found")
+        fetch_url = url
+        print("   Direct download (no proxy)")
 
-    print("\n[1/4] Reading configuration from TOKEN_ACCESS sheet...")
+    response = await pyfetch(fetch_url, method="GET")
+    if not response.ok:
+        raise ValueError(f"download failed (HTTP {response.status}). Is the file shared publicly? "
+                         f"For private files use TOKEN_ACCESS")
+    content_disposition = response.headers.get('Content-Disposition', '') or ''
+    return await response.bytes(), url, content_disposition
 
-    try:
-        token_sheet = book.sheets['TOKEN_ACCESS']
 
-        provider = token_sheet.range("B5").value
-        if not provider or not isinstance(provider, str):
-            print("\nERROR: Storage Provider not selected in TOKEN_ACCESS!B5")
-            token_sheet.range("D5").value = "ERROR: Select a provider from dropdown"
-            token_sheet.range("D5").font.color = '#FF0000'
-            token_sheet.range("D5").font.bold = True
-            return
-
-        provider = provider.strip()
-        valid_providers = ["Dropbox", "Google Drive", "GitHub"]
-        if provider not in valid_providers:
-            print(f"\nERROR: Invalid provider '{provider}' in TOKEN_ACCESS!B5")
-            token_sheet.range("D5").value = f"ERROR: Must be {', '.join(valid_providers)}"
-            token_sheet.range("D5").font.color = '#FF0000'
-            token_sheet.range("D5").font.bold = True
-            return
-
-        token_sheet.range("D5").value = ""
-        token_sheet.range("D6").value = ""
-        token_sheet.range("D7").value = ""
-
-        print(f"   Provider: {provider}")
-
-        file_input = token_sheet.range("B6").value
-        if not file_input or not isinstance(file_input, str):
-            print(f"\nERROR: File Path/ID not found in TOKEN_ACCESS!B6")
-            token_sheet.range("D6").value = "ERROR: Enter file path or ID"
-            token_sheet.range("D6").font.color = '#FF0000'
-            token_sheet.range("D6").font.bold = True
-            return
-
-        file_input = file_input.strip()
-        print(f"   File Path/ID: {file_input[:60]}{'...' if len(file_input) > 60 else ''}")
-
-        validation_error = None
-        if provider == "Dropbox":
-            if not file_input.startswith("/"):
-                validation_error = "Dropbox paths must start with / (e.g., /folder/file.ext)"
-        elif provider == "Google Drive":
-            extracted_id = extract_gdrive_file_id(file_input)
-            if extracted_id:
-                if extracted_id != file_input:
-                    print(f"   Extracted file ID from URL: {extracted_id}")
-                file_input = extracted_id
-            else:
-                validation_error = "Invalid Google Drive input. Provide a file ID or URL"
-        elif provider == "GitHub":
-            if not file_input.lower().startswith('http'):
-                validation_error = "GitHub requires full URL (e.g., https://github.com/...)"
-
-        if validation_error:
-            print(f"\nERROR: Format validation failed")
-            token_sheet.range("D6").value = f"ERROR: {validation_error}"
-            token_sheet.range("D6").font.color = '#FF0000'
-            token_sheet.range("D6").font.bold = True
-            return
-
-        auth_proxy_url = None
-        if provider == "GitHub":
-            auth_proxy_url = token_sheet.range("B7").value
-            if auth_proxy_url and isinstance(auth_proxy_url, str):
-                auth_proxy_url = auth_proxy_url.strip()
-                if auth_proxy_url:
-                    print(f"   Auth Proxy: {auth_proxy_url}")
-
-    except KeyError:
-        print("ERROR: TOKEN_ACCESS sheet not found!")
-        return
-    except Exception as e:
-        print(f"ERROR: Could not read TOKEN_ACCESS sheet: {e}")
-        return
-
-    print("\n[2/4] Downloading file...")
-    download_start_time = time.time()
-
-    try:
-        if provider == "Dropbox":
-            print("   Mode: Dropbox OAuth")
-            try:
-                access_token = await get_dropbox_token()
-            except ValueError as e:
-                print(f"\nERROR: Dropbox authentication failed: {e}")
-                token_sheet.range("D6").value = "ERROR: Check Dropbox credentials"
-                token_sheet.range("D6").font.color = '#FF0000'
-                token_sheet.range("D6").font.bold = True
-                return
-
-            print(f"   Downloading from Dropbox: {file_input}")
-            response = await pyfetch(
-                "https://content.dropboxapi.com/2/files/download",
-                method="POST",
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Dropbox-API-Arg": json.dumps({"path": file_input})
-                }
-            )
-
-            if not response.ok:
-                error_text = await response.text()
-                print(f"\nERROR: Dropbox download failed: {response.status}")
-                token_sheet.range("D6").value = f"ERROR: Download failed ({response.status})"
-                token_sheet.range("D6").font.color = '#FF0000'
-                token_sheet.range("D6").font.bold = True
-                return
-
-            file_bytes = await response.bytes()
-            source_display = f"Dropbox: {file_input}"
-
-        elif provider == "Google Drive":
-            print("   Mode: Google Drive OAuth")
-            try:
-                access_token = await get_gdrive_token()
-            except ValueError as e:
-                print(f"\nERROR: Google Drive authentication failed: {e}")
-                token_sheet.range("D6").value = "ERROR: Check Google Drive credentials"
-                token_sheet.range("D6").font.color = '#FF0000'
-                token_sheet.range("D6").font.bold = True
-                return
-
-            download_url = f"https://www.googleapis.com/drive/v3/files/{file_input}?alt=media"
-            print(f"   Downloading from Google Drive: {file_input}")
-            response = await pyfetch(
-                download_url,
-                method="GET",
-                headers={"Authorization": f"Bearer {access_token}"}
-            )
-
-            if not response.ok:
-                error_text = await response.text()
-                print(f"\nERROR: Google Drive download failed: {response.status}")
-                token_sheet.range("D6").value = f"ERROR: Download failed ({response.status})"
-                token_sheet.range("D6").font.color = '#FF0000'
-                token_sheet.range("D6").font.bold = True
-                return
-
-            file_bytes = await response.bytes()
-            source_display = f"Google Drive: {file_input}"
-
-        elif provider == "GitHub":
-            print("   Mode: GitHub PAT")
-            github_pat = os.environ.get("GITHUB.PAT")
-            if not github_pat:
-                print("\nERROR: GITHUB.PAT not found in environment variables")
-                token_sheet.range("D6").value = "ERROR: GITHUB.PAT not set"
-                token_sheet.range("D6").font.color = '#FF0000'
-                token_sheet.range("D6").font.bold = True
-                return
-
-            print(f"   GitHub PAT: {github_pat[:10]}...{github_pat[-4:]}")
-
+async def download_with_token(provider: str, file_input: str, auth_proxy_url: str) -> Tuple[bytes, str]:
+    """Downloads a private file with your own credentials (environment variables).
+    Returns (bytes, cleaned path / ID / URL)."""
+    if provider == "Dropbox":
+        if not file_input.startswith("/"):
+            raise ValueError("Dropbox paths start with / (e.g. /folder/file.csv)")
+        access_token = await get_dropbox_token()
+        response = await pyfetch(
+            "https://content.dropboxapi.com/2/files/download",
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Dropbox-API-Arg": json.dumps({"path": file_input})
+            }
+        )
+    elif provider == "Google Drive":
+        file_id = extract_gdrive_file_id(file_input)
+        if not file_id:
+            raise ValueError("enter a Google Drive file ID or file link")
+        file_input = file_id
+        access_token = await get_gdrive_token()
+        response = await pyfetch(
+            f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media",
+            method="GET",
+            headers={"Authorization": f"Bearer {access_token}"}
+        )
+    elif provider == "GitHub":
+        if not file_input.lower().startswith('http'):
+            raise ValueError("GitHub needs the full file URL (https://github.com/... or https://raw.githubusercontent.com/...)")
+        github_pat = os.environ.get("GITHUB.PAT")
+        if not github_pat:
+            raise ValueError("GITHUB.PAT is not set (xlwings Lite: Settings > Environment Variables)")
+        headers = {"Authorization": f"token {github_pat}"}
+        api_url = github_contents_api_url(file_input)
+        if api_url:
+            # repository file: the GitHub API accepts a token from the browser, raw.githubusercontent.com does not
+            fetch_url = api_url
+            headers["Accept"] = "application/vnd.github.raw"
+            print("   Via the GitHub API (repository file, up to 100 MB)")
+        elif auth_proxy_url:
+            fetch_url = build_private_proxy_url(file_input, auth_proxy_url)
+            print(f"   Via auth proxy: {auth_proxy_url}")
+        elif is_github_release_url(file_input):
+            raise ValueError("GitHub release files need the Auth Proxy URL in B7")
+        else:
             fetch_url = file_input
-            fetch_headers = {"Authorization": f"token {github_pat}"}
-
-            if auth_proxy_url:
-                fetch_url = build_private_proxy_url(file_input, auth_proxy_url)
-                print(f"   Using auth proxy: {auth_proxy_url}")
-            elif is_github_release_url(file_input):
-                print("\nERROR: Auth Proxy URL required for private GitHub access")
-                token_sheet.range("D6").value = "ERROR: Auth Proxy URL required in B7"
-                token_sheet.range("D6").font.color = '#FF0000'
-                token_sheet.range("D6").font.bold = True
-                return
-
-            print(f"   Downloading from GitHub: {file_input[:80]}...")
-            response = await pyfetch(fetch_url, method="GET", headers=fetch_headers)
-
-            if not response.ok:
-                error_text = await response.text()
-                print(f"\nERROR: GitHub download failed: {response.status}")
-                token_sheet.range("D6").value = f"ERROR: Download failed ({response.status})"
-                token_sheet.range("D6").font.color = '#FF0000'
-                token_sheet.range("D6").font.bold = True
-                return
-
-            file_bytes = await response.bytes()
-            source_display = f"GitHub: {file_input[:80]}{'...' if len(file_input) > 80 else ''}"
-
-        file_size_mb = len(file_bytes) / (1024 * 1024)
-        download_end_time = time.time()
-        download_duration = download_end_time - download_start_time
-        download_minutes = int(download_duration // 60)
-        download_seconds = int(download_duration % 60)
-
-        print(f"   Downloaded: {file_size_mb:.2f} MB in {download_minutes}m {download_seconds}s")
-
-    except Exception as e:
-        print(f"\nERROR: Download failed: {e}")
-        token_sheet.range("D6").value = f"ERROR: {str(e)[:50]}"
-        token_sheet.range("D6").font.color = '#FF0000'
-        token_sheet.range("D6").font.bold = True
-        return
-
-    print("\n[3/4] Detecting file type...")
-
-    file_type = detect_file_type_from_path(file_input)
-    if file_type:
-        print(f"   File type detected from path: {file_type.upper()}")
+        response = await pyfetch(fetch_url, method="GET", headers=headers)
     else:
+        raise ValueError("choose Dropbox, Google Drive or GitHub in B5")
+
+    if not response.ok:
+        raise ValueError(f"{provider} download failed (HTTP {response.status}). Check the path and your credentials")
+    return await response.bytes(), file_input
+
+
+def github_contents_api_url(url: str) -> Optional[str]:
+    """Maps a repository file link (raw.githubusercontent.com/owner/repo/branch/path or
+    github.com/owner/repo/blob/branch/path) to the GitHub contents API. None for anything else."""
+    import urllib.parse
+    parsed = urllib.parse.urlparse(url)
+    parts = [p for p in parsed.path.split('/') if p]
+    host = parsed.netloc.lower()
+    if host == 'raw.githubusercontent.com' and len(parts) >= 4:
+        owner, repo, rest = parts[0], parts[1], parts[2:]
+        if rest[:2] == ['refs', 'heads'] and len(rest) >= 4:
+            rest = rest[2:]
+    elif host in ('github.com', 'www.github.com') and len(parts) >= 5 and parts[2] == 'blob':
+        owner, repo, rest = parts[0], parts[1], parts[3:]
+    else:
+        return None
+    ref, path = rest[0], '/'.join(rest[1:])
+    return f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={urllib.parse.quote(ref)}"
+
+
+def read_token_inputs(sheet: xw.Sheet) -> Tuple[str, str, str]:
+    provider = cell_text(sheet, "B5")
+    file_input = cell_text(sheet, "B6")
+    auth_proxy_url = cell_text(sheet, "B7")
+    if provider not in ("Dropbox", "Google Drive", "GitHub"):
+        raise ValueError("choose Dropbox, Google Drive or GitHub in B5")
+    if not file_input:
+        raise ValueError("enter the file path, ID or URL in B6")
+    return provider, file_input, auth_proxy_url
+
+
+# === SECTION: PROCESS ===
+# =============================================================================
+# PROCESS A DOWNLOADED FILE (DuckDB, schema, profile) OR SAVE IT AS-IS
+# =============================================================================
+
+def process_file(book: xw.Book, file_bytes: bytes, name_hint: str, source_display: str,
+                 source_sheet: str, download_seconds: float, content_disposition: str = "") -> str:
+    """Detects the file type, saves it to the temp folder, loads it into DuckDB and writes the
+    schema and profile to a result sheet. Returns the result sheet name; raises on failure."""
+    file_type = detect_file_type(name_hint) or detect_file_type_from_path(name_hint)
+    if file_type:
+        print(f"   File type from name: {file_type.upper()}")
+    if not file_type and content_disposition:
+        file_type = detect_file_type_from_header(content_disposition)
+        if file_type:
+            print(f"   File type from download header: {file_type.upper()}")
+    if not file_type:
         file_type = detect_file_type_from_bytes(file_bytes)
         if file_type:
-            print(f"   File type detected from content: {file_type.upper()}")
-
+            print(f"   File type from content: {file_type.upper()}")
     if file_type == 'html_error':
-        print("\nERROR: Received HTML page instead of data file")
-        token_sheet.range("D6").value = "ERROR: Private link? Check credentials"
-        token_sheet.range("D6").font.color = '#FF0000'
-        token_sheet.range("D6").font.bold = True
-        return
-
+        raise ValueError("received a web page, not a data file. Is the link private or not a direct file link?")
     if not file_type:
-        print("\nERROR: Could not determine file type")
-        token_sheet.range("D6").value = "ERROR: Could not detect file type"
-        token_sheet.range("D6").font.color = '#FF0000'
-        token_sheet.range("D6").font.bold = True
-        return
+        raise ValueError("could not tell the file type. Data files: Parquet, DuckDB, SQLite, CSV, TSV, pipe, TXT, JSON. "
+                         "For other files use the As-Is download")
 
     delimiter = None
     if file_type in ('csv', 'tsv', 'txt', 'pipe'):
         delimiter = detect_delimiter_from_content(file_bytes)
+        print(f"   Delimiter: {repr(delimiter)}")
 
-    if file_type == 'parquet':
-        temp_path = get_parquet_temp_path()
-    elif file_type == 'duckdb':
-        temp_path = get_duckdb_temp_path()
-    elif file_type == 'json':
-        temp_path = get_json_temp_path()
-    else:
-        temp_path = get_delimited_temp_path()
-
-    save_start_time = time.time()
+    temp_path = {'parquet': get_parquet_temp_path(), 'duckdb': get_duckdb_temp_path(),
+                 'json': get_json_temp_path()}.get(file_type, get_delimited_temp_path())
+    save_start = time.time()
     with open(temp_path, 'wb') as f:
         f.write(file_bytes)
-    save_duration = time.time() - save_start_time
-    save_seconds = int(save_duration)
-    print(f"   Saved to temp file in {save_seconds}s")
+    save_seconds = int(time.time() - save_start)
+    save_last_import_state(source_sheet, source_display, file_type, temp_path)
 
-    print(f"\n[4/4] Processing {file_type.upper()} file...")
-
-    save_last_import_state("TOKEN_ACCESS", file_input, file_type, temp_path)
-
+    file_size_mb = len(file_bytes) / (1024 * 1024)
+    minutes, seconds = format_duration(download_seconds)
+    print(f"\nProcessing {file_type.upper()} file ({file_size_mb:.1f} MB)...")
     if file_type == 'parquet':
-        display_parquet_schema(book, source_display, file_size_mb, download_minutes, download_seconds, save_seconds)
+        ok = display_parquet_schema(book, source_display, file_size_mb, minutes, seconds, save_seconds)
     elif file_type == 'duckdb':
-        display_duckdb_schema(book, source_display, file_size_mb, download_minutes, download_seconds, save_seconds)
+        ok = display_duckdb_schema(book, source_display, file_size_mb, minutes, seconds, save_seconds)
     elif file_type == 'json':
-        display_json_schema(book, source_display, file_size_mb, download_minutes, download_seconds, save_seconds)
+        ok = display_json_schema(book, source_display, file_size_mb, minutes, seconds, save_seconds)
     else:
-        display_delimited_schema(book, source_display, file_size_mb, download_minutes, download_seconds, save_seconds, delimiter, file_type)
+        ok = display_delimited_schema(book, source_display, file_size_mb, minutes, seconds, save_seconds,
+                                      delimiter, file_type)
+    if ok is False:
+        raise ValueError("the file downloaded but could not be read. See the console for details")
+    return RESULT_SHEET.get(file_type, 'CSV')
 
 
-# === SECTION: SCRIPT_SHARELINK ===
+def save_as_is(file_bytes: bytes, folder: str, filename: str) -> str:
+    """Saves the downloaded bytes unchanged. Returns the full path."""
+    if not filename or '.' not in filename:
+        raise ValueError("enter a file name with extension (e.g. report.pdf)")
+    if '/' in filename or '\\' in filename:
+        raise ValueError("enter just the file name, and the folder in the next cell")
+    name_part, ext_part = filename.rsplit('.', 1)
+    filename = f"{name_part}.{ext_part.lower()}"
+    folder = (folder or tempfile.gettempdir()).rstrip('/') or '/'
+    if not os.path.isdir(folder):
+        raise ValueError(f"folder {folder} not found. To save to your computer, add a folder in xlwings Lite "
+                         f"(Files > Local Folders) and type its path, e.g. /data")
+    path = os.path.join(folder, filename)
+    with open(path, 'wb') as f:
+        f.write(file_bytes)
+    return path
+
+
+# === SECTION: SCRIPTS ===
 # =============================================================================
-# SCRIPT: IMPORT DATA FROM SHAREABLE LINKS
+# SCRIPTS (one button each)
 # =============================================================================
 
-@script
+@script(name="1. Link: Import to DuckDB", button="[btn_link_import]SHARE_LINK_ACCESS!D5")
 async def import_via_sharelink(book: xw.Book):
-    """
-    Import data from shareable links (backward compatible with existing sheets).
-
-    Reads from MASTER or SHARE_LINK_ACCESS sheet:
-        B5  - Source URL
-        B12 - Private Repo Flag (1 = use auth proxy, else normal)
-        B17 - Auth Proxy URL (required when B12=1)
-    """
+    """Imports a data file from a public or shareable link (SHARE_LINK_ACCESS!B5) into DuckDB."""
+    sheet = book.sheets[LINK_SHEET]
     print("=" * 60)
-    print("SHAREABLE LINK DATA IMPORTER")
-    print("Supports public/private URLs with optional auth proxy")
+    print("IMPORT FROM LINK")
     print("=" * 60)
-
-    print("\n   Cleaning up previous imports...")
-    cleanup_count = 0
-
-    for temp_path in [get_parquet_temp_path(), get_duckdb_temp_path(),
-                      get_delimited_temp_path(), get_json_temp_path()]:
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-                cleanup_count += 1
-            except Exception as e:
-                print(f"   Warning: Could not remove {os.path.basename(temp_path)}: {e}")
-
-    if cleanup_count > 0:
-        print(f"   Removed {cleanup_count} previous temp file(s)")
-    else:
-        print(f"   No previous temp files found")
-
-    print("\n[1/4] Reading configuration from sheet...")
-
-    sheet_name = None
-    for name in ['SHARE_LINK_ACCESS', 'MASTER']:
-        if name in [s.name for s in book.sheets]:
-            sheet_name = name
-            break
-
-    if not sheet_name:
-        print("ERROR: Neither SHARE_LINK_ACCESS nor MASTER sheet found!")
+    url = cell_text(sheet, "B5")
+    if not url.lower().startswith("http"):
+        fail(sheet, "paste a file link starting with http in B5")
         return
-
+    set_status(sheet, "Downloading...")
+    await book.flush()
+    clear_previous_imports()
     try:
-        master_sheet = book.sheets[sheet_name]
-        print(f"   Using sheet: {sheet_name}")
-
-        data_url = master_sheet.range("B5").value
-        if not data_url or not isinstance(data_url, str):
-            print(f"ERROR: No URL found in {sheet_name}!B5")
-            return
-
-        data_url = data_url.strip()
-        print(f"   URL: {data_url[:80]}{'...' if len(data_url) > 80 else ''}")
-
-        private_flag = master_sheet.range("B12").value
-        is_private = False
-        if private_flag is not None:
-            if isinstance(private_flag, (int, float)):
-                is_private = int(private_flag) == 1
-            elif isinstance(private_flag, str):
-                is_private = private_flag.strip() == "1"
-
-        print(f"   Private Repo: {'Yes' if is_private else 'No'}")
-
-        auth_proxy_url = None
-        if is_private:
-            auth_proxy_url = master_sheet.range("B17").value
-            if not auth_proxy_url or not isinstance(auth_proxy_url, str) or not auth_proxy_url.strip():
-                print("\nERROR: Auth Proxy URL required for private repos!")
-                return
-            auth_proxy_url = auth_proxy_url.strip()
-            print(f"   Auth Proxy: {auth_proxy_url}")
-
-        github_pat = None
-        if is_private:
-            github_pat = os.environ.get("GITHUB.PAT")
-            if not github_pat:
-                print("\nERROR: GITHUB.PAT environment variable not found!")
-                return
-            print(f"   GitHub PAT: {github_pat[:10]}...{github_pat[-4:]}")
-
+        start = time.time()
+        file_bytes, url, content_disposition = await download_link(url)
+        took = time.time() - start
+        print(f"   Downloaded {len(file_bytes) / (1024 * 1024):.1f} MB in {took:.0f}s")
+        result_sheet = process_file(book, file_bytes, url, url, LINK_SHEET, took, content_disposition)
     except Exception as e:
-        print(f"ERROR: Could not read sheet: {e}")
+        fail(sheet, str(e))
         return
-
-    data_url, was_converted = convert_google_drive_url(data_url)
-    if was_converted:
-        print(f"   [Google Drive URL converted to direct download format]")
-
-    data_url, was_converted = convert_dropbox_url(data_url)
-    if was_converted:
-        print(f"   [Dropbox URL converted to direct download format (dl=1)]")
-
-    print("\n[2/4] Analyzing URL...")
-
-    use_proxy = needs_proxy(data_url, is_private)
-
-    if is_private and is_github_url(data_url):
-        print(f"   Mode: Private GitHub (using auth proxy)")
-    elif use_proxy:
-        print(f"   Mode: Public with CORS proxy")
-    else:
-        print(f"   Mode: Direct (no proxy)")
-
-    file_type = detect_file_type(data_url)
-    if file_type:
-        print(f"   File type detected from URL: {file_type.upper()}")
-    else:
-        print(f"   File type: Not in URL, will check headers and content")
-
-    fetch_headers = {}
-
-    if is_private and is_github_url(data_url):
-        fetch_url = build_private_proxy_url(data_url, auth_proxy_url)
-        fetch_headers["Authorization"] = f"token {github_pat}"
-        print(f"   Fetch URL: {auth_proxy_url}/...")
-    elif use_proxy:
-        fetch_url = build_public_proxy_url(data_url)
-        print(f"   Fetch URL: {PUBLIC_PROXY_URL}/...")
-    else:
-        fetch_url = data_url
-        print(f"   Fetch URL: Direct")
-
-    print("\n[3/4] Downloading file...")
-
-    try:
-        download_start_time = time.time()
-
-        if fetch_headers:
-            response = await pyfetch(fetch_url, method="GET", headers=fetch_headers)
-        else:
-            response = await pyfetch(fetch_url, method="GET")
-
-        if not response.ok:
-            print(f"ERROR: Download failed with status {response.status}")
-            master_sheet.range("D5").value = "ERROR: Download failed. Private link? Use TOKEN_ACCESS"
-            master_sheet.range("D5").font.color = '#FF0000'
-            master_sheet.range("D5").font.bold = True
-            return
-
-        file_bytes = await response.bytes()
-        file_size_mb = len(file_bytes) / (1024 * 1024)
-
-        download_end_time = time.time()
-        download_duration = download_end_time - download_start_time
-        download_minutes = int(download_duration // 60)
-        download_seconds = int(download_duration % 60)
-
-        print(f"   Downloaded: {file_size_mb:.2f} MB in {download_minutes}m {download_seconds}s")
-
-        if not file_type:
-            try:
-                content_disposition = response.headers.get('Content-Disposition', '')
-                file_type = detect_file_type_from_header(content_disposition)
-                if file_type:
-                    print(f"   File type detected from header: {file_type.upper()}")
-            except Exception as e:
-                pass
-
-        if not file_type:
-            file_type = detect_file_type_from_bytes(file_bytes)
-            if file_type:
-                print(f"   File type detected from content: {file_type.upper()}")
-
-        if file_type == 'html_error':
-            print("\nERROR: Received HTML page instead of data file")
-            master_sheet.range("D5").value = "ERROR: Private link? Use TOKEN_ACCESS with credentials"
-            master_sheet.range("D5").font.color = '#FF0000'
-            master_sheet.range("D5").font.bold = True
-            return
-
-        if not file_type:
-            print("\nERROR: Could not determine file type")
-            master_sheet.range("D5").value = "ERROR: Invalid file. Private link? Use TOKEN_ACCESS"
-            master_sheet.range("D5").font.color = '#FF0000'
-            master_sheet.range("D5").font.bold = True
-            return
-
-        delimiter = None
-        if file_type in ('csv', 'tsv', 'txt', 'pipe'):
-            expected_delimiter_map = {
-                'csv': ',',
-                'tsv': '\t',
-                'pipe': '|',
-                'txt': None
-            }
-            expected_delimiter = expected_delimiter_map.get(file_type)
-            actual_delimiter = detect_delimiter_from_content(file_bytes)
-            delimiter_name = {',': 'comma', '\t': 'tab', '|': 'pipe'}.get(actual_delimiter, repr(actual_delimiter))
-
-            if expected_delimiter and actual_delimiter != expected_delimiter:
-                expected_name = {',': 'comma', '\t': 'tab', '|': 'pipe'}.get(expected_delimiter, repr(expected_delimiter))
-                print(f"   File extension suggests {expected_name}, but content uses {delimiter_name}")
-
-            delimiter = actual_delimiter
-
-        if file_type == 'parquet':
-            temp_path = get_parquet_temp_path()
-        elif file_type == 'duckdb':
-            temp_path = get_duckdb_temp_path()
-        elif file_type == 'json':
-            temp_path = get_json_temp_path()
-        else:
-            temp_path = get_delimited_temp_path()
-
-        save_start_time = time.time()
-        with open(temp_path, 'wb') as f:
-            f.write(file_bytes)
-        save_duration = time.time() - save_start_time
-        save_seconds = int(save_duration)
-        print(f"   Saved to temp file in {save_seconds}s")
-
-    except Exception as e:
-        print(f"ERROR: Failed to download file: {e}")
-        master_sheet.range("D5").value = "ERROR: Download failed. Private link? Use TOKEN_ACCESS"
-        master_sheet.range("D5").font.color = '#FF0000'
-        master_sheet.range("D5").font.bold = True
-        return
-
-    print(f"\n[4/4] Processing {file_type.upper()} file...")
-
-    save_last_import_state(sheet_name, data_url, file_type, temp_path)
-
-    try:
-        if file_type == 'parquet':
-            result = display_parquet_schema(book, data_url, file_size_mb, download_minutes, download_seconds, save_seconds)
-        elif file_type == 'duckdb':
-            result = display_duckdb_schema(book, data_url, file_size_mb, download_minutes, download_seconds, save_seconds)
-        elif file_type == 'json':
-            result = display_json_schema(book, data_url, file_size_mb, download_minutes, download_seconds, save_seconds)
-        else:
-            result = display_delimited_schema(book, data_url, file_size_mb, download_minutes, download_seconds, save_seconds, delimiter, file_type)
-
-        if result is False:
-            master_sheet.range("D5").value = "ERROR: File processing failed. Private link? Use TOKEN_ACCESS"
-            master_sheet.range("D5").font.color = '#FF0000'
-            master_sheet.range("D5").font.bold = True
-    except Exception as e:
-        print(f"ERROR: File processing failed: {e}")
-        master_sheet.range("D5").value = "ERROR: File processing failed. Private link? Use TOKEN_ACCESS"
-        master_sheet.range("D5").font.color = '#FF0000'
-        master_sheet.range("D5").font.bold = True
+    set_status(sheet, f"Done: results on the {result_sheet} sheet ({time.time() - start:.0f}s)")
 
 
-# === SECTION: SCRIPT_RAW_IMPORT ===
-# =============================================================================
-# SCRIPT: RAW FILE IMPORT (NEW)
-# =============================================================================
-
-@script
+@script(name="2. Link: Download As-Is", button="[btn_link_raw]SHARE_LINK_ACCESS!D8")
 async def import_raw_sharelink(book: xw.Book):
-    """
-    Raw file download - no processing, just save with user-specified filename.
-
-    Reads from SHARE_LINK_ACCESS sheet:
-        B5  - Source URL
-        B7  - Raw Mode Flag (must be 1 to use this function)
-        B8  - Output Filename with extension (e.g., report.pdf, image.png)
-
-    Output:
-        D8  - Saved file path (dark green text)
-
-    Note: This function is for PUBLIC URLs only. For private repos, use TOKEN_ACCESS.
-    """
+    """Downloads any file from a link without processing it (name in B8, folder in B9)."""
+    sheet = book.sheets[LINK_SHEET]
     print("=" * 60)
-    print("RAW FILE IMPORTER")
-    print("Downloads any file type without processing")
+    print("DOWNLOAD AS-IS FROM LINK")
     print("=" * 60)
-
-    # Find the sheet
-    sheet_name = None
-    for name in ['SHARE_LINK_ACCESS', 'MASTER']:
-        if name in [s.name for s in book.sheets]:
-            sheet_name = name
-            break
-
-    if not sheet_name:
-        print("ERROR: Neither SHARE_LINK_ACCESS nor MASTER sheet found!")
+    url = cell_text(sheet, "B5")
+    if not url.lower().startswith("http"):
+        fail(sheet, "paste a file link starting with http in B5")
         return
-
+    set_status(sheet, "Downloading...")
+    await book.flush()
     try:
-        master_sheet = book.sheets[sheet_name]
-        print(f"   Using sheet: {sheet_name}")
-
-        # Clear previous output
-        master_sheet.range("D8").value = ""
-
-        # B5: Source URL
-        data_url = master_sheet.range("B5").value
-        if not data_url or not isinstance(data_url, str):
-            print(f"ERROR: No URL found in {sheet_name}!B5")
-            master_sheet.range("D8").value = "ERROR: Enter URL in B5"
-            master_sheet.range("D8").font.color = '#FF0000'
-            master_sheet.range("D8").font.bold = True
-            return
-
-        data_url = data_url.strip()
-        print(f"   URL: {data_url[:80]}{'...' if len(data_url) > 80 else ''}")
-
-        # B7: Raw Mode Flag
-        raw_flag = master_sheet.range("B7").value
-        is_raw_mode = False
-        if raw_flag is not None:
-            if isinstance(raw_flag, (int, float)):
-                is_raw_mode = int(raw_flag) == 1
-            elif isinstance(raw_flag, str):
-                is_raw_mode = raw_flag.strip() == "1"
-
-        if not is_raw_mode:
-            print("\nERROR: Raw mode not enabled!")
-            print("   Set B7 = 1 to enable raw mode")
-            print("   Or use import_via_sharelink for processed imports")
-            master_sheet.range("D8").value = "ERROR: Set B7=1 for raw mode"
-            master_sheet.range("D8").font.color = '#FF0000'
-            master_sheet.range("D8").font.bold = True
-            return
-
-        # B8: Output Filename
-        output_filename = master_sheet.range("B8").value
-        if not output_filename or not isinstance(output_filename, str):
-            print("\nERROR: Output filename not found in B8")
-            print("   Enter filename with extension (e.g., report.pdf, image.png)")
-            master_sheet.range("D8").value = "ERROR: Enter filename in B8 (e.g., file.pdf)"
-            master_sheet.range("D8").font.color = '#FF0000'
-            master_sheet.range("D8").font.bold = True
-            return
-
-        output_filename = output_filename.strip()
-
-        # Normalize extension to lowercase
-        if '.' in output_filename:
-            name_part, ext_part = output_filename.rsplit('.', 1)
-            output_filename = f"{name_part}.{ext_part.lower()}"
-
-        print(f"   Output filename: {output_filename}")
-
-        # Get file extension for state tracking
-        file_ext = output_filename.rsplit('.', 1)[-1].lower() if '.' in output_filename else 'unknown'
-
+        file_bytes, url, _ = await download_link(url)
+        path = save_as_is(file_bytes, cell_text(sheet, "B9"), cell_text(sheet, "B8"))
     except Exception as e:
-        print(f"ERROR: Could not read sheet: {e}")
+        fail(sheet, str(e))
         return
+    save_last_import_state(LINK_SHEET, url, path.rsplit('.', 1)[-1], path)
+    print(f"   Saved {size_text(len(file_bytes))} to {path}")
+    set_status(sheet, f"Saved: {path} ({size_text(len(file_bytes))})")
 
-    # URL conversion for GDrive/Dropbox
-    data_url, was_converted = convert_google_drive_url(data_url)
-    if was_converted:
-        print(f"   [Google Drive URL converted]")
 
-    data_url, was_converted = convert_dropbox_url(data_url)
-    if was_converted:
-        print(f"   [Dropbox URL converted]")
-
-    # Check if proxy needed (public URLs only for raw import)
-    use_proxy = needs_proxy(data_url, is_private=False)
-
-    if use_proxy:
-        fetch_url = build_public_proxy_url(data_url)
-        print(f"   Using CORS proxy")
-    else:
-        fetch_url = data_url
-        print(f"   Direct fetch")
-
-    # Download
-    print("\n   Downloading file...")
-    download_start_time = time.time()
-
-    try:
-        response = await pyfetch(fetch_url, method="GET")
-
-        if not response.ok:
-            print(f"ERROR: Download failed with status {response.status}")
-            master_sheet.range("D8").value = f"ERROR: Download failed ({response.status})"
-            master_sheet.range("D8").font.color = '#FF0000'
-            master_sheet.range("D8").font.bold = True
-            return
-
-        file_bytes = await response.bytes()
-        file_size_mb = len(file_bytes) / (1024 * 1024)
-
-        download_duration = time.time() - download_start_time
-        download_seconds = int(download_duration)
-
-        print(f"   Downloaded: {file_size_mb:.2f} MB in {download_seconds}s")
-
-    except Exception as e:
-        print(f"ERROR: Failed to download: {e}")
-        master_sheet.range("D8").value = f"ERROR: {str(e)[:40]}"
-        master_sheet.range("D8").font.color = '#FF0000'
-        master_sheet.range("D8").font.bold = True
-        return
-
-    # Save file
-    temp_path = get_raw_temp_path(output_filename)
-
-    try:
-        with open(temp_path, 'wb') as f:
-            f.write(file_bytes)
-        print(f"   Saved to: {temp_path}")
-    except Exception as e:
-        print(f"ERROR: Failed to save file: {e}")
-        master_sheet.range("D8").value = f"ERROR: Save failed - {str(e)[:30]}"
-        master_sheet.range("D8").font.color = '#FF0000'
-        master_sheet.range("D8").font.bold = True
-        return
-
-    # Save state for test functions
-    save_last_import_state(sheet_name, data_url, file_ext, temp_path)
-
-    # Write success to D8 (dark green)
-    master_sheet.range("D8").value = f"Saved: {temp_path}"
-    master_sheet.range("D8").font.color = '#006400'  # Dark green
-    master_sheet.range("D8").font.bold = True
-
-    print("\n" + "=" * 60)
-    print("RAW FILE IMPORT COMPLETE!")
-    print(f"Filename: {output_filename}")
-    print(f"Size: {file_size_mb:.2f} MB")
-    print(f"Path: {temp_path}")
+@script(name="3. Token: Import to DuckDB", button="[btn_token_import]TOKEN_ACCESS!D6")
+async def import_via_token(book: xw.Book):
+    """Imports a private data file with your own token (TOKEN_ACCESS!B5:B7) into DuckDB."""
+    sheet = book.sheets[TOKEN_SHEET]
     print("=" * 60)
+    print("IMPORT WITH TOKEN")
+    print("=" * 60)
+    try:
+        provider, file_input, auth_proxy_url = read_token_inputs(sheet)
+    except ValueError as e:
+        fail(sheet, str(e))
+        return
+    set_status(sheet, f"Downloading from {provider}...")
+    await book.flush()
+    clear_previous_imports()
+    try:
+        start = time.time()
+        file_bytes, file_input = await download_with_token(provider, file_input, auth_proxy_url)
+        took = time.time() - start
+        print(f"   Downloaded {len(file_bytes) / (1024 * 1024):.1f} MB in {took:.0f}s")
+        result_sheet = process_file(book, file_bytes, file_input, f"{provider}: {file_input}",
+                                    TOKEN_SHEET, took)
+    except Exception as e:
+        fail(sheet, str(e))
+        return
+    set_status(sheet, f"Done: results on the {result_sheet} sheet ({time.time() - start:.0f}s)")
 
 
-@script
+@script(name="4. Token: Download As-Is", button="[btn_token_raw]TOKEN_ACCESS!D9")
 async def import_raw_token(book: xw.Book):
-    """
-    Raw file download via OAuth/PAT - no processing, just save with user-specified filename.
-
-    Reads from TOKEN_ACCESS sheet:
-        B5  - Storage Provider (dropdown: "Dropbox", "Google Drive", "GitHub")
-        B6  - File Path/ID (format depends on provider)
-        B7  - Auth Proxy URL (optional, only for GitHub private repos)
-        B9  - Raw Mode Flag (must be 1 to use this function)
-        B10 - Output Filename with extension (e.g., report.pdf, image.png)
-
-    Output:
-        D10 - Saved file path (dark green text)
-
-    Note: Uses OAuth tokens (Dropbox/GDrive) or PAT (GitHub) for authentication.
-    """
+    """Downloads any private file with your own token, without processing (name in B9, folder in B10)."""
+    sheet = book.sheets[TOKEN_SHEET]
     print("=" * 60)
-    print("RAW FILE IMPORTER (TOKEN ACCESS)")
-    print("Downloads any file type via OAuth/PAT without processing")
+    print("DOWNLOAD AS-IS WITH TOKEN")
     print("=" * 60)
-
     try:
-        token_sheet = book.sheets['TOKEN_ACCESS']
-    except KeyError:
-        print("ERROR: TOKEN_ACCESS sheet not found!")
+        provider, file_input, auth_proxy_url = read_token_inputs(sheet)
+    except ValueError as e:
+        fail(sheet, str(e))
         return
-
-    # Clear previous output
-    token_sheet.range("D10").value = ""
-
-    # B5: Storage Provider
-    provider = token_sheet.range("B5").value
-    if not provider or not isinstance(provider, str):
-        print("\nERROR: Storage Provider not selected in TOKEN_ACCESS!B5")
-        token_sheet.range("D10").value = "ERROR: Select provider in B5"
-        token_sheet.range("D10").font.color = '#FF0000'
-        token_sheet.range("D10").font.bold = True
-        return
-
-    provider = provider.strip()
-    valid_providers = ["Dropbox", "Google Drive", "GitHub"]
-    if provider not in valid_providers:
-        print(f"\nERROR: Invalid provider '{provider}' in TOKEN_ACCESS!B5")
-        token_sheet.range("D10").value = f"ERROR: Must be {', '.join(valid_providers)}"
-        token_sheet.range("D10").font.color = '#FF0000'
-        token_sheet.range("D10").font.bold = True
-        return
-
-    print(f"   Provider: {provider}")
-
-    # B6: File Path/ID
-    file_input = token_sheet.range("B6").value
-    if not file_input or not isinstance(file_input, str):
-        print(f"\nERROR: File Path/ID not found in TOKEN_ACCESS!B6")
-        token_sheet.range("D10").value = "ERROR: Enter file path/ID in B6"
-        token_sheet.range("D10").font.color = '#FF0000'
-        token_sheet.range("D10").font.bold = True
-        return
-
-    file_input = file_input.strip()
-    print(f"   File Path/ID: {file_input[:60]}{'...' if len(file_input) > 60 else ''}")
-
-    # Validate file input format per provider
-    validation_error = None
-    if provider == "Dropbox":
-        if not file_input.startswith("/"):
-            validation_error = "Dropbox paths must start with / (e.g., /folder/file.ext)"
-    elif provider == "Google Drive":
-        extracted_id = extract_gdrive_file_id(file_input)
-        if extracted_id:
-            if extracted_id != file_input:
-                print(f"   Extracted file ID from URL: {extracted_id}")
-            file_input = extracted_id
-        else:
-            validation_error = "Invalid Google Drive input. Provide a file ID or URL"
-    elif provider == "GitHub":
-        if not file_input.lower().startswith('http'):
-            validation_error = "GitHub requires full URL (e.g., https://github.com/...)"
-
-    if validation_error:
-        print(f"\nERROR: Format validation failed")
-        token_sheet.range("D10").value = f"ERROR: {validation_error[:40]}"
-        token_sheet.range("D10").font.color = '#FF0000'
-        token_sheet.range("D10").font.bold = True
-        return
-
-    # B7: Auth Proxy URL (GitHub only)
-    auth_proxy_url = None
-    if provider == "GitHub":
-        auth_proxy_url = token_sheet.range("B7").value
-        if auth_proxy_url and isinstance(auth_proxy_url, str):
-            auth_proxy_url = auth_proxy_url.strip()
-            if auth_proxy_url:
-                print(f"   Auth Proxy: {auth_proxy_url}")
-
-    # B9: Raw Mode Flag
-    raw_flag = token_sheet.range("B9").value
-    is_raw_mode = False
-    if raw_flag is not None:
-        if isinstance(raw_flag, (int, float)):
-            is_raw_mode = int(raw_flag) == 1
-        elif isinstance(raw_flag, str):
-            is_raw_mode = raw_flag.strip() == "1"
-
-    if not is_raw_mode:
-        print("\nERROR: Raw mode not enabled!")
-        print("   Set B9 = 1 to enable raw mode")
-        print("   Or use import_via_token for processed imports")
-        token_sheet.range("D10").value = "ERROR: Set B9=1 for raw mode"
-        token_sheet.range("D10").font.color = '#FF0000'
-        token_sheet.range("D10").font.bold = True
-        return
-
-    # B10: Output Filename
-    output_filename = token_sheet.range("B10").value
-    if not output_filename or not isinstance(output_filename, str):
-        print("\nERROR: Output filename not found in B10")
-        print("   Enter filename with extension (e.g., report.pdf, image.png)")
-        token_sheet.range("D10").value = "ERROR: Enter filename in B10 (e.g., file.pdf)"
-        token_sheet.range("D10").font.color = '#FF0000'
-        token_sheet.range("D10").font.bold = True
-        return
-
-    output_filename = output_filename.strip()
-
-    # Normalize extension to lowercase
-    if '.' in output_filename:
-        name_part, ext_part = output_filename.rsplit('.', 1)
-        output_filename = f"{name_part}.{ext_part.lower()}"
-
-    print(f"   Output filename: {output_filename}")
-
-    # Get file extension for state tracking
-    file_ext = output_filename.rsplit('.', 1)[-1].lower() if '.' in output_filename else 'unknown'
-
-    # Download file
-    print("\n   Downloading file...")
-    download_start_time = time.time()
-
+    set_status(sheet, f"Downloading from {provider}...")
+    await book.flush()
     try:
-        if provider == "Dropbox":
-            print("   Mode: Dropbox OAuth")
-            try:
-                access_token = await get_dropbox_token()
-            except ValueError as e:
-                print(f"\nERROR: Dropbox authentication failed: {e}")
-                token_sheet.range("D10").value = "ERROR: Check Dropbox credentials"
-                token_sheet.range("D10").font.color = '#FF0000'
-                token_sheet.range("D10").font.bold = True
-                return
-
-            response = await pyfetch(
-                "https://content.dropboxapi.com/2/files/download",
-                method="POST",
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Dropbox-API-Arg": json.dumps({"path": file_input})
-                }
-            )
-
-            if not response.ok:
-                print(f"\nERROR: Dropbox download failed: {response.status}")
-                token_sheet.range("D10").value = f"ERROR: Download failed ({response.status})"
-                token_sheet.range("D10").font.color = '#FF0000'
-                token_sheet.range("D10").font.bold = True
-                return
-
-            file_bytes = await response.bytes()
-            source_url = f"dropbox:{file_input}"
-
-        elif provider == "Google Drive":
-            print("   Mode: Google Drive OAuth")
-            try:
-                access_token = await get_gdrive_token()
-            except ValueError as e:
-                print(f"\nERROR: Google Drive authentication failed: {e}")
-                token_sheet.range("D10").value = "ERROR: Check GDrive credentials"
-                token_sheet.range("D10").font.color = '#FF0000'
-                token_sheet.range("D10").font.bold = True
-                return
-
-            download_url = f"https://www.googleapis.com/drive/v3/files/{file_input}?alt=media"
-            response = await pyfetch(
-                download_url,
-                method="GET",
-                headers={"Authorization": f"Bearer {access_token}"}
-            )
-
-            if not response.ok:
-                print(f"\nERROR: Google Drive download failed: {response.status}")
-                token_sheet.range("D10").value = f"ERROR: Download failed ({response.status})"
-                token_sheet.range("D10").font.color = '#FF0000'
-                token_sheet.range("D10").font.bold = True
-                return
-
-            file_bytes = await response.bytes()
-            source_url = f"gdrive:{file_input}"
-
-        elif provider == "GitHub":
-            print("   Mode: GitHub PAT")
-            github_pat = os.environ.get("GITHUB.PAT")
-            if not github_pat:
-                print("\nERROR: GITHUB.PAT not found in environment variables")
-                token_sheet.range("D10").value = "ERROR: GITHUB.PAT not set"
-                token_sheet.range("D10").font.color = '#FF0000'
-                token_sheet.range("D10").font.bold = True
-                return
-
-            print(f"   GitHub PAT: {github_pat[:10]}...{github_pat[-4:]}")
-
-            fetch_url = file_input
-            fetch_headers = {"Authorization": f"token {github_pat}"}
-
-            if auth_proxy_url:
-                fetch_url = build_private_proxy_url(file_input, auth_proxy_url)
-                print(f"   Using auth proxy")
-            elif is_github_release_url(file_input):
-                print("\nERROR: Auth Proxy URL required for private GitHub releases")
-                token_sheet.range("D10").value = "ERROR: Set Auth Proxy in B7"
-                token_sheet.range("D10").font.color = '#FF0000'
-                token_sheet.range("D10").font.bold = True
-                return
-
-            response = await pyfetch(fetch_url, method="GET", headers=fetch_headers)
-
-            if not response.ok:
-                print(f"\nERROR: GitHub download failed: {response.status}")
-                token_sheet.range("D10").value = f"ERROR: Download failed ({response.status})"
-                token_sheet.range("D10").font.color = '#FF0000'
-                token_sheet.range("D10").font.bold = True
-                return
-
-            file_bytes = await response.bytes()
-            source_url = file_input
-
-        file_size_mb = len(file_bytes) / (1024 * 1024)
-        download_duration = time.time() - download_start_time
-        download_seconds = int(download_duration)
-
-        print(f"   Downloaded: {file_size_mb:.2f} MB in {download_seconds}s")
-
+        file_bytes, file_input = await download_with_token(provider, file_input, auth_proxy_url)
+        path = save_as_is(file_bytes, cell_text(sheet, "B10"), cell_text(sheet, "B9"))
     except Exception as e:
-        print(f"ERROR: Failed to download: {e}")
-        token_sheet.range("D10").value = f"ERROR: {str(e)[:40]}"
-        token_sheet.range("D10").font.color = '#FF0000'
-        token_sheet.range("D10").font.bold = True
+        fail(sheet, str(e))
         return
-
-    # Save file
-    temp_path = get_raw_temp_path(output_filename)
-
-    try:
-        with open(temp_path, 'wb') as f:
-            f.write(file_bytes)
-        print(f"   Saved to: {temp_path}")
-    except Exception as e:
-        print(f"ERROR: Failed to save file: {e}")
-        token_sheet.range("D10").value = f"ERROR: Save failed - {str(e)[:30]}"
-        token_sheet.range("D10").font.color = '#FF0000'
-        token_sheet.range("D10").font.bold = True
-        return
-
-    # Save state for test functions
-    save_last_import_state("TOKEN_ACCESS", source_url, file_ext, temp_path)
-
-    # Write success to D10 (dark green)
-    token_sheet.range("D10").value = f"Saved: {temp_path}"
-    token_sheet.range("D10").font.color = '#006400'  # Dark green
-    token_sheet.range("D10").font.bold = True
-
-    print("\n" + "=" * 60)
-    print("RAW FILE IMPORT COMPLETE!")
-    print(f"Provider: {provider}")
-    print(f"Filename: {output_filename}")
-    print(f"Size: {file_size_mb:.2f} MB")
-    print(f"Path: {temp_path}")
-    print("=" * 60)
+    save_last_import_state(TOKEN_SHEET, file_input, path.rsplit('.', 1)[-1], path)
+    print(f"   Saved {size_text(len(file_bytes))} to {path}")
+    set_status(sheet, f"Saved: {path} ({size_text(len(file_bytes))})")
 
 
 # === SECTION: REMOTE_LOADER ===
@@ -2327,7 +1678,7 @@ _loaded_modules = {}
 GITHUB_RAW_BASE = "https://raw.githubusercontent.com/amararun/xlwings-lite-apps-codes-docs/main/remote_modules"
 
 
-async def load_remote_module(module_name: str, github_url: str = None) -> dict:
+async def load_remote_module(module_name: str, github_url: Optional[str] = None) -> dict:
     """
     Fetch a Python module from GitHub, execute it, and cache in memory.
     """
@@ -2371,97 +1722,55 @@ async def load_remote_module(module_name: str, github_url: str = None) -> dict:
 # SCRIPT: RUN STATS
 # =============================================================================
 
-@script
+@script(name="5. Run Stats (sample data)", button="[btn_stats]SHARE_LINK_ACCESS!D14")
 async def run_stats(book: xw.Book):
-    """
-    Universal statistics generator - auto-detects data type and loads remote module.
-
-    Auto-detects:
-    - IMDB data (title_basics table) -> loads imdb_stats.py from GitHub
-    - Cricket data (match_type, striker columns) -> loads cricket_stats.py from GitHub
-
-    PREREQUISITE: Run 'import_via_sharelink' or 'import_via_token' first.
-    """
+    """Statistics for the sample data sets: detects cricket or IMDB data in the last imported
+    DuckDB / Parquet file and loads the matching module from GitHub (remote_modules)."""
+    sheet = book.sheets[LINK_SHEET]
     print("=" * 60)
-    print("STATISTICS GENERATOR (Remote Module Loader)")
-    print("Auto-detects: Cricket stats or IMDB stats")
+    print("RUN STATS (cricket or IMDB samples)")
     print("=" * 60)
 
-    # Check for DuckDB file
     duck_db_path = get_duckdb_temp_path()
     parquet_path = get_parquet_temp_path()
-
-    if not os.path.exists(duck_db_path) and not os.path.exists(parquet_path):
-        print("\nERROR: No data file found!")
-        print("   Run import_via_sharelink or import_via_token first")
-        return
-
-    # Determine data source
     if os.path.exists(duck_db_path):
-        print(f"\n   Found DuckDB file: {duck_db_path}")
-        data_source = 'duckdb'
+        data_source, data_path = 'duckdb', duck_db_path
+    elif os.path.exists(parquet_path):
+        data_source, data_path = 'parquet', parquet_path
     else:
-        print(f"\n   Found Parquet file: {parquet_path}")
-        data_source = 'parquet'
+        fail(sheet, "no imported DuckDB or Parquet file yet. Import a cricket or IMDB sample from FILES_URLS first")
+        return
+    print(f"   Data file: {data_path}")
+    set_status(sheet, "Running stats...")
+    await book.flush()
 
-    # Connect and detect data type
     try:
         if data_source == 'duckdb':
-            conn = duckdb.connect(duck_db_path, read_only=True)
-            tables = conn.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='main'").fetchall()
-            table_names = [t[0] for t in tables]
-            print(f"   Tables found: {table_names}")
+            conn = duckdb.connect(data_path, read_only=True)
+            table_names = [t[0] for t in conn.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema='main'").fetchall()]
+            column_sets = [[c[0].lower() for c in conn.execute(f'DESCRIBE "{t}"').fetchall()] for t in table_names]
         else:
             conn = duckdb.connect()
             table_names = ['parquet_data']
-
-        # Detect IMDB data
-        is_imdb = 'title_basics' in table_names or any('imdb' in t.lower() for t in table_names)
-
-        # Detect Cricket data
-        is_cricket = False
-        if data_source == 'duckdb':
-            for table in table_names:
-                try:
-                    cols = conn.execute(f'DESCRIBE "{table}"').fetchall()
-                    col_names = [c[0].lower() for c in cols]
-                    if 'match_type' in col_names or 'striker' in col_names or 'batting_team' in col_names:
-                        is_cricket = True
-                        break
-                except:
-                    pass
-        else:
-            try:
-                cols = conn.execute(f"DESCRIBE SELECT * FROM '{parquet_path}'").fetchall()
-                col_names = [c[0].lower() for c in cols]
-                if 'match_type' in col_names or 'striker' in col_names or 'batting_team' in col_names:
-                    is_cricket = True
-            except:
-                pass
-
+            column_sets = [[c[0].lower() for c in conn.execute(f"DESCRIBE SELECT * FROM '{data_path}'").fetchall()]]
         conn.close()
+        print(f"   Tables: {table_names}")
 
-        # Load appropriate module
-        if is_imdb:
+        is_imdb = 'title_basics' in table_names
+        is_cricket = any({'match_type', 'striker', 'bowler'} <= set(cols) for cols in column_sets)
+
+        if is_imdb and data_source == 'duckdb':
             print("\n   Detected: IMDB data")
             module = await load_remote_module('imdb_stats')
-            if 'run_imdb_stats' in module:
-                module['run_imdb_stats'](book)
-            else:
-                print("   ERROR: run_imdb_stats function not found in module")
-
+            module['run_imdb_stats'](book)
+            set_status(sheet, "Done: IMDB stats on the IMDB_STATS and IMDB_CHARTS sheets")
         elif is_cricket:
-            print("\n   Detected: Cricket data")
+            print("\n   Detected: cricket data")
             module = await load_remote_module('cricket_stats')
-            if 'run_cricket_stats' in module:
-                module['run_cricket_stats'](book, 'duckdb' if data_source == 'duckdb' else 'parquet',
-                                            duck_db_path if data_source == 'duckdb' else parquet_path)
-            else:
-                print("   ERROR: run_cricket_stats function not found in module")
-
+            module['run_cricket_stats'](book, data_source, data_path)
+            set_status(sheet, "Done: cricket stats on the DOCS sheet and one sheet per match type (e.g. ODI, ODI_CHARTS)")
         else:
-            print("\n   Could not auto-detect data type")
-            print("   Expected: IMDB data (title_basics table) or Cricket data (match_type/striker columns)")
-
+            fail(sheet, "Run Stats works on the cricket and IMDB samples only (FILES_URLS). Your data is on the result sheet")
     except Exception as e:
-        print(f"\nERROR: {e}")
+        fail(sheet, f"stats failed: {e}")

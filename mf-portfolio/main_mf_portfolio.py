@@ -5,14 +5,14 @@ import re
 import textwrap
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-from typing import Tuple, Optional
+from typing import Any, Tuple, Optional
 from xlwings import script
 
 # -------------------------
 # Helper Functions (Following AI Coder Guidelines)
 # -------------------------
 
-def find_table_in_workbook(book: xw.Book, table_name: str) -> Tuple[Optional[xw.Sheet], Optional[object]]:
+def find_table_in_workbook(book: xw.Book, table_name: str) -> Tuple[Optional[xw.Sheet], Any]:
     """
     Searches all sheets for a table and returns both the sheet and table objects.
     Returns: (xw.Sheet, table_object) or (None, None) if not found.
@@ -196,7 +196,7 @@ def create_single_compound_chart(data: list, display_period: pd.Timestamp, other
         fig.text(0.5, 0.01, wrapped_outlier_text, ha='center', va='bottom', fontsize=8, color='black',
                  bbox=dict(boxstyle='round,pad=0.4', facecolor='#FFEBEE', edgecolor='#E57373'))
 
-    plt.tight_layout(rect=[0, 0.05, 1, 0.95])
+    plt.tight_layout(rect=(0, 0.05, 1, 0.95))
     return fig
 
 def save_and_insert_chart(fig, output_sheet: xw.Sheet, chart_name: str, anchor: str = "A1"):
@@ -265,7 +265,7 @@ def create_percentage_change_chart(ax, companies, mv_changes, qty_changes):
     ax.tick_params(axis='y', colors='#525252')
     
     if outliers:
-        return f"🔺 OUTLIERS (Capped): { ', '.join(outliers)}"
+        return f"▲ OUTLIERS (Capped): { ', '.join(outliers)}"
     return ""
 
 def create_fund_count_chart(ax, companies, funds_A, funds_B, monthA: pd.Timestamp, monthB: pd.Timestamp):
@@ -337,7 +337,7 @@ def create_market_value_chart(ax, companies, market_values, comments, period_str
 # Pipeline Steps
 # -------------------------
 
-def step_validation_totals(df: pd.DataFrame, monthA: str, monthB: str) -> pd.DataFrame:
+def step_validation_totals(df: pd.DataFrame, monthA: pd.Timestamp, monthB: pd.Timestamp) -> pd.DataFrame:
     """
     Produce totals table: scheme_name | metric | monthA_total | monthB_total
     """
@@ -418,7 +418,7 @@ def step_isin_mapping(df: pd.DataFrame, cut_n: int = 7) -> pd.DataFrame:
     
     return out
 
-def step_summary_by_standardized_name(df: pd.DataFrame, isin_map_df: pd.DataFrame, monthA: str, monthB: str) -> pd.DataFrame:
+def step_summary_by_standardized_name(df: pd.DataFrame, isin_map_df: pd.DataFrame, monthA: pd.Timestamp, monthB: pd.Timestamp) -> pd.DataFrame:
     """
     Final summary by standardized_name_display (grouped using ISIN mapping).
     """
@@ -529,17 +529,218 @@ def step_summary_by_standardized_name(df: pd.DataFrame, isin_map_df: pd.DataFram
     return final
 
 # -------------------------
+# Step 1: Import converted files (replaces the old VBA import macro)
+# -------------------------
+IMPORT_SHEET = "CONTROL"
+IMPORT_FOLDER_CELL = "C14"   # the folder to read from; empty means /data
+REQUIRED_COLS = ["SCHEME_NAME", "MONTH_END", "ISIN", "INSTRUMENT_NAME", "MARKET_VALUE", "QUANTITY"]
+OPTIONAL_COLS = ["BSE_SYMBOL", "NSE_SYMBOL", "COMPANY_NAME_STD"]
+DELIMITER_NAMES = {"|": "pipe", ",": "comma", "\t": "tab"}
+
+
+def _detect_delimiter(first_line: str) -> str:
+    counts = {d: first_line.count(d) for d in DELIMITER_NAMES}
+    return max(counts, key=lambda d: counts[d])
+
+
+def _mounted_folders() -> list:
+    import os
+    system = {"bin", "boot", "dev", "etc", "home", "lib", "lib64", "media", "mnt", "opt", "proc",
+              "root", "run", "sbin", "srv", "sys", "tmp", "usr", "var", "src", "lib32", "libx32", "share"}
+    try:
+        return sorted(d for d in os.listdir("/") if d not in system and os.path.isdir(f"/{d}"))
+    except OSError:
+        return []
+
+
+def read_import_folder(folder: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Read every .txt / .csv / .pipe file in the folder. Returns (data, per-file report)."""
+    import os
+    files = sorted(f for f in os.listdir(folder) if f.lower().endswith((".txt", ".csv", ".pipe")))
+    frames, report = [], []
+    seen: dict = {}
+    for f in files:
+        path = os.path.join(folder, f)
+        with open(path, encoding="utf-8-sig", errors="replace") as fh:
+            first = fh.readline()
+        sep = _detect_delimiter(first)
+        d = pd.read_csv(path, sep=sep, dtype=str, encoding="utf-8-sig", encoding_errors="replace",
+                        keep_default_na=False)
+        d.columns = [str(c).strip().upper() for c in d.columns]
+        row = {"File": f, "Delimiter": DELIMITER_NAMES[sep], "Rows": len(d), "Funds": "", "Months": "", "Status": ""}
+        missing = [c for c in REQUIRED_COLS if c not in d.columns]
+        if missing:
+            row["Status"] = "Skipped: missing columns " + ", ".join(missing)
+            report.append(row)
+            continue
+        for c in d.columns:
+            d[c] = d[c].astype(str).str.strip()
+        d = d[d["SCHEME_NAME"] != ""]
+        # A fund-month already imported from an earlier file would be counted twice: keep the first.
+        keys = d["SCHEME_NAME"] + "|" + d["MONTH_END"]
+        dup = keys.isin(list(seen.keys()))
+        notes = sorted({f"{k.replace('|', ' ')} already imported from {seen[k]}" for k in keys[dup]})
+        d = d[~dup]
+        for k in keys[~dup].unique():
+            seen[k] = f
+        d = d.assign(SOURCE_FILE=f)
+        frames.append(d)
+        if d.empty:
+            row.update(Rows=0, Status="Skipped: " + "; ".join(notes))
+            report.append(row)
+            continue
+        row.update(Rows=len(d), Funds=", ".join(sorted(d["SCHEME_NAME"].unique())),
+                   Months=", ".join(sorted(d["MONTH_END"].unique())),
+                   Status="OK" if not notes else "OK, skipped duplicates: " + "; ".join(notes))
+        report.append(row)
+    if not frames:
+        return pd.DataFrame(columns=REQUIRED_COLS), pd.DataFrame(report)
+    data = pd.concat(frames, ignore_index=True)
+    cols = REQUIRED_COLS + [c for c in OPTIONAL_COLS if c in data.columns] + ["SOURCE_FILE"]
+    data = data[cols].copy()
+    data["MONTH_END"] = pd.to_datetime(data["MONTH_END"], errors="coerce")
+    for c in ["MARKET_VALUE", "QUANTITY"]:
+        data[c] = pd.to_numeric(data[c].str.replace(",", "", regex=False), errors="coerce")
+    return data, pd.DataFrame(report)
+
+
+IMPORT_STATUS_CELL = "A18"   # big status message under Step 2 (wrapped cell)
+
+
+def _set_import_status(control, text: str, ok: bool):
+    cell = control[IMPORT_STATUS_CELL]
+    cell.value = text
+    cell.font.bold = True
+    cell.font.size = 12 if ok else 14
+    cell.font.color = "#1F4E79" if ok else "#C00000"
+
+
+def _write_data_sheet(book: xw.Book, control, data: pd.DataFrame):
+    """Replace the DATA sheet (table T_DATA) with this data. Removes any old IMPORT_LOG."""
+    for name in ["DATA", "IMPORT_LOG"]:
+        for sh in book.sheets:
+            if sh.name == name:
+                sh.delete()
+    data_sheet = book.sheets.add(name="DATA", after=control)
+    data_sheet["A1"].options(index=False).value = data
+    data_sheet.tables.add(source=data_sheet["A1"].resize(len(data) + 1, data.shape[1]), name="T_DATA")
+    data_sheet["E2"].resize(len(data), 2).number_format = "#,##0.00"
+    return data_sheet
+
+
+@script(name="1a. Import Your Files", button="[run_import_btn]CONTROL!C12")
+def import_files(book: xw.Book):
+    """Import all converted files from the import folder into the DATA sheet (table T_DATA)."""
+    import os
+    control = book.sheets[IMPORT_SHEET]
+    folder = str(control[IMPORT_FOLDER_CELL].value or "").strip() or "/data"
+    print(f"📂 Import folder: {folder}")
+    if not os.path.isdir(folder):
+        mounts = ", ".join("/" + m for m in _mounted_folders()) or "none"
+        msg = (f"❌ Folder {folder} not found. Mount a folder (Files > Local Folders) and put its path in {IMPORT_FOLDER_CELL}, "
+               f"or clear {IMPORT_FOLDER_CELL} to use /data. Folders available now: {mounts}")
+        print(msg)
+        _set_import_status(control, msg, ok=False)
+        return
+    data, report = read_import_folder(folder)
+    print(report.to_string(index=False) if not report.empty else "No .txt / .csv / .pipe files found.")
+    if data.empty:
+        if report.empty:
+            msg = (f"❌ No converter files in {folder}. Upload them under Files > Import/Export, "
+                   f"or mount a folder (Files > Local Folders) and put its path in {IMPORT_FOLDER_CELL}.")
+        else:
+            msg = (f"❌ None of the {len(report)} file(s) in {folder} could be used "
+                   f"(expected converter output with columns {', '.join(REQUIRED_COLS)}). See the Output pane.")
+        print(msg)
+        _set_import_status(control, msg, ok=False)
+        return
+
+    data_sheet = _write_data_sheet(book, control, data)
+
+    n_ok = int(report["Status"].str.startswith("OK").sum())
+    log_sheet = book.sheets.add(name="IMPORT_LOG", after=data_sheet)
+    log_sheet["A1"].value = f"Import log: {len(data):,} rows from {n_ok} file(s) in {folder}"
+    log_sheet["A1"].font.bold = True
+    log_sheet["A3"].options(index=False).value = report
+    log_sheet.tables.add(source=log_sheet["A3"].resize(len(report) + 1, report.shape[1]))
+    months = sorted(data["MONTH_END"].dropna().unique())
+    month_txt = ", ".join(pd.Timestamp(m).strftime("%d-%b-%Y") for m in months)
+    skipped = len(report) - n_ok
+    msg = (f"✅ Imported {len(data):,} rows from {n_ok} file(s): {data['SCHEME_NAME'].nunique()} fund(s), "
+           f"months {month_txt}." + (f" {skipped} file(s) skipped, see IMPORT_LOG." if skipped else " See IMPORT_LOG."))
+    if len(months) < 2:
+        msg += " Stage 1 needs at least two months."
+    print(msg)
+    _set_import_status(control, msg, ok=len(months) >= 2)
+    control.activate()
+
+
+@script(name="1b. Use Sample Data", button="[run_sample_btn]CONTROL!C16")
+def use_sample_data(book: xw.Book):
+    """Load the built-in sample (SAMPLE_DATA sheet, table T_SAMPLE) into DATA, ready for Stage 1."""
+    control = book.sheets[IMPORT_SHEET]
+    _, sample_table = find_table_in_workbook(book, "T_SAMPLE")
+    if sample_table is None:
+        _set_import_status(control, "❌ Sample data (sheet SAMPLE_DATA, table T_SAMPLE) not found in this workbook.", ok=False)
+        return
+    data = sample_table.range.options(pd.DataFrame, index=False).value
+    data["MONTH_END"] = pd.to_datetime(data["MONTH_END"], errors="coerce")
+    for c in ["MARKET_VALUE", "QUANTITY"]:
+        data[c] = pd.to_numeric(data[c], errors="coerce")
+    _write_data_sheet(book, control, data)
+    months = sorted(data["MONTH_END"].dropna().unique())
+    msg = (f"✅ Sample data loaded: {len(data):,} rows, {data['SCHEME_NAME'].nunique()} fund(s), months "
+           + ", ".join(pd.Timestamp(m).strftime("%d-%b-%Y") for m in months) + ". Now run 2. Stage 1.")
+    print(msg)
+    _set_import_status(control, msg, ok=True)
+    control.activate()
+
+
+def step_holdings_by_fund(df: pd.DataFrame, isin_map_df: pd.DataFrame, monthA, monthB) -> pd.DataFrame:
+    """One row per company and fund, both months side by side, for sorting and filtering in Excel."""
+    d = df.copy()
+    d["MARKET_VALUE"] = pd.to_numeric(d["MARKET_VALUE"], errors="coerce").fillna(0.0)
+    d["QUANTITY"] = pd.to_numeric(d["QUANTITY"], errors="coerce").fillna(0.0)
+    m = d.merge(isin_map_df[["ISIN", "standardized_name_display"]].drop_duplicates("ISIN"), on="ISIN", how="left")
+    name = m["standardized_name_display"]
+    if "COMPANY_NAME_STD" in m.columns:
+        name = name.fillna(m["COMPANY_NAME_STD"].replace("", np.nan))
+    m["Name"] = name.fillna(m["INSTRUMENT_NAME"])
+    totals = m.groupby(["SCHEME_NAME", "MONTH_END"])["MARKET_VALUE"].transform("sum")
+    m["pct"] = np.where(totals != 0, m["MARKET_VALUE"] / totals, np.nan)
+    g = m.groupby(["Name", "SCHEME_NAME", "MONTH_END"], as_index=False).agg(
+        mv=("MARKET_VALUE", "sum"), qty=("QUANTITY", "sum"), pct=("pct", "sum"))
+    a = g[g["MONTH_END"] == monthA].drop(columns="MONTH_END")
+    b = g[g["MONTH_END"] == monthB].drop(columns="MONTH_END")
+    w = b.merge(a, on=["Name", "SCHEME_NAME"], how="outer", suffixes=("_B", "_A"))
+    for c in ["mv_B", "mv_A", "qty_B", "qty_A", "pct_B", "pct_A"]:
+        w[c] = w[c].fillna(0.0)
+    w["status"] = np.select([(w["qty_A"] == 0) & (w["qty_B"] > 0), (w["qty_A"] > 0) & (w["qty_B"] == 0)],
+                            ["New", "Exited"], default="Held")
+    w["qty_chg"] = np.where(w["qty_A"] != 0, w["qty_B"] / w["qty_A"].replace(0, np.nan) - 1, np.nan)
+    a_lbl, b_lbl = pd.Timestamp(monthA).strftime("%b %Y"), pd.Timestamp(monthB).strftime("%b %Y")
+    out = pd.DataFrame({
+        "Name": w["Name"], "Fund": w["SCHEME_NAME"],
+        f"% of Fund {b_lbl}": w["pct_B"], f"% of Fund {a_lbl}": w["pct_A"],
+        "Change in % (pts)": w["pct_B"] - w["pct_A"], "Qty % Change": w["qty_chg"],
+        f"Mkt Val {b_lbl}": w["mv_B"], f"Mkt Val {a_lbl}": w["mv_A"],
+        f"Qty {b_lbl}": w["qty_B"], f"Qty {a_lbl}": w["qty_A"], "Status": w["status"],
+    })
+    return out.sort_values(["Name", "Fund"]).reset_index(drop=True)
+
+
+# -------------------------
 # Main Script Function
 # -------------------------
 
-@script(button="[run_stage1_btn]Control!J19")
+@script(name="2. Stage 1: Map Names", button="[run_stage1_btn]CONTROL!C21")
 def stage1_full_pipeline(book: xw.Book):
     """
     Stage 1: Full MF Holdings Analysis Pipeline
     """
     run_full_pipeline(book, run_mode="full")
 
-@script(button="[run_stage2_btn]Control!J24")
+@script(name="3. Stage 2: Build Summary", button="[run_stage2_btn]CONTROL!C25")
 def stage2_summary_update(book: xw.Book):
     """
     Stage 2: Update Summary Analysis Only
@@ -727,6 +928,21 @@ def run_full_pipeline(book: xw.Book, run_mode: str = "full"):
                 print(f"⚠️ Could not apply number formatting to summary: {e}")
         
         sheets_created.append(summary_sheet)
+
+        # --- Side-by-side holdings per fund (sort and filter in Excel) ---
+        try:
+            by_fund_df = step_holdings_by_fund(df, isin_mapping_df, monthA, monthB)
+            by_fund_sheet = create_formatted_sheet(
+                "HOLDINGS_BY_FUND", by_fund_df,
+                f"Holdings by Fund, side by side ({monthB_title} vs {monthA_title})")
+            n = len(by_fund_df)
+            if n:
+                by_fund_sheet["C4"].resize(n, 4).number_format = "0.00%"
+                by_fund_sheet["G4"].resize(n, 4).number_format = "#,##0"
+            sheets_created.append(by_fund_sheet)
+            print(f"✅ HOLDINGS_BY_FUND: {n} rows (company x fund)")
+        except Exception as e:
+            print(f"⚠️ Could not build HOLDINGS_BY_FUND: {e}")
         
         # --- Create exportDat sheet ---
         print("📄 Creating exportDat sheet...")

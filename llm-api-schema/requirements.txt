@@ -1,0 +1,6 @@
+# Versions are automatically pinned in
+# requirements-pinned.txt
+xlwings  # required
+pyodide-http  # required
+pandas
+matplotlib
