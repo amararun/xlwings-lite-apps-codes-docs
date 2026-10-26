@@ -1,10 +1,12 @@
 # xlwings Lite: Coding Guidelines for AI Coders (Humans Welcome)
 
-**Version 3.4 · 24 October 2026.** The latest copy is always at https://www.tigzig.com/files/xlwings/AI_CODER_INSTRUCTIONS.md. If your copy shows a lower version number, download the latest. Changes are listed under Version History at the end.
+**Version 3.5 · 26 October 2026.** The latest copy is always at https://www.tigzig.com/files/xlwings/AI_CODER_INSTRUCTIONS.md. If your copy shows a lower version number, download the latest. Changes are listed under Version History at the end.
 
 **Tested on:** xlwings Lite add-in build 1.0.0.104 (the Python package inside it: xlwings 0.37.7), Pyodide 314.0.1 (Python 3.14.2, pandas 3.0.2, numpy 2.4.3), Excel desktop on Windows. Every platform behaviour marked **[tested]** was run in Excel on that build. Items marked **[docs]** come from the official documentation and were not re-run here.
 
 **Official docs:** https://lite.xlwings.org (machine-readable: https://lite.xlwings.org/llms-full.txt). If something here disagrees with a newer build, trust the build and the docs.
+
+**Ready-made tools to start from:** 13 working workbooks with their code, covering a web scraper, LLM schema detection with EDA, a Neon Postgres query with an XGBoost model, technical analysis reports, a Yahoo Finance analyzer, a mutual fund portfolio comparison, a file importer into DuckDB (Google Drive, Dropbox, GitHub), batch API pulls for hundreds of tickers, local folder file patterns, =WINGMAN() examples and three practice kits. If the user's tool is close to one of these, start from it. Workbooks and what each does: https://www.tigzig.com/xlwings-starter. Code for the ten tools (not the practice kits) as plain .py files, one folder per tool: https://github.com/amararun/xlwings-lite-apps-codes-docs
 
 ---
 
@@ -12,7 +14,7 @@
 
 1. **Write DataFrames with `.options(index=False)`.** `sheet["A1"].value = df` writes the pandas index as an extra first column. [tested]
 2. **Re-runnable sheets: delete, then add, with a loop.** `"Name" in book.sheets` returns `False` even for a sheet that exists. Check names with `[s.name for s in book.sheets]` or loop over the sheets. [tested]
-3. **Size new ranges with `.resize()`, never `.expand()`.** Reads come from a snapshot taken when the script started, so `.expand()` and `used_range` cannot see data written in the same run. [tested]
+3. **Size new ranges with `.resize()`, never `.expand()`.** Reads come from a snapshot taken when the script started, so `.expand()` and `used_range` cannot see data written in the same run. Reading data that was already there before the run with `expand="table"` is fine. [tested]
 4. **Find tables by name across sheets** with the `find_table_in_workbook()` helper (section 5.2). `table.sheet` raises `AttributeError`; use `table.parent` if you have the table already. [tested]
 5. **Table names are unique across the whole workbook.** If a user renamed an old output sheet, its table keeps its name, and the next run's `tables.add(name=...)` fails with a generic `InvalidArgument`. Omit `name=` unless the user asked for one, and when you do name a table, remove any existing table of that name first (section 5.3). [tested]
 6. **Excel-side errors surface at flush, not at the call.** A `try/except` around `sheet.tables.add()` catches nothing unless you `await book.flush()` inside the `try`. That needs an `async def` script (section 3). [tested]
@@ -148,7 +150,7 @@ async def build(book: xw.Book):
 sheet["A1"].options(index=False).value = df            # always index=False
 df = sheet["A1"].options(pd.DataFrame, index=False, expand="table").value  # read
 ```
-Writing a DataFrame with mixed-type columns (e.g. `"< 600"` and `600` in one column), with `""` in a float column, or as a 2D Python list (`[["Label", 1.6], ["P", 0.8]]`) all write correctly on the tested build. Older builds failed on some of these. [tested]
+Writing a DataFrame with mixed-type columns (e.g. `"< 600"` and `600` in one column), with `""` in a float column, or as a 2D Python list (`[["Label", 1.6], ["P", 0.8]]`) all write correctly on the tested build. Older builds did not handle some of these. [tested]
 
 Still good practice, for pandas reasons: use `None` (not `""`) for missing numbers so the column stays numeric, and convert genuinely mixed label columns with `.astype(str)` if you will sort or filter them.
 
@@ -410,6 +412,7 @@ async def post_json(url: str, payload: dict, headers: dict, tries: int = 3) -> d
 # Key from an environment variable: headers={"x-goog-api-key": os.getenv("GEMINI_API_KEY")}
 ```
 - Send keys in a header, not in the URL.
+- This helper always sends `Content-Type`. For Neon (section 12.3), call `pyfetch` without that header.
 - **LLM model names get retired.** Where the provider offers an alias (for example `gemini-flash-latest`), use it as the default and let the user change it in a cell.
 - **Structured output:** ask for JSON with a schema (Gemini `response_schema`, OpenAI-style `response_format: json_schema`). Check returned field names against your real columns before using them.
 - `requests` (sync) and `httpx` (async) also work once installed; prefer async calls for long or many requests, so `await book.flush()` can show progress between them. `pd.read_csv("https://raw.githubusercontent.com/...")` works for CORS-enabled URLs. [docs]
@@ -486,12 +489,11 @@ if df["X"].isna().any():
 5. **Balanced samples (test/control):** `sklearn.model_selection.train_test_split(..., stratify=...)`.
 6. **Narrate** progress with `print()` and finish with a clear success line.
 7. **Keep the editor's Problems pane clean.** xlwings Lite checks code with the Ty type checker, and a published workbook full of red squiggles looks broken even when it runs. The common fixes: an optional argument is `name: Optional[str] = None` (not `name: str = None`); a list of dicts with mixed values is typed `list[dict[str, Any]]`; pass a tuple where a library expects one (`plt.tight_layout(rect=(0, 0, 1, 0.9))`); convert values read from a config dict before passing them on (`int(config['bins'])`). [tested]
-8. **Activate** the last output sheet (see rule 14 for the button caveat).
-9. **Number scripts in run order:** `@script(name="1. Import Data")`, `@script(name="2. Build Summary")`. The Run dropdown and sheet buttons then read as steps.
-10. **Show the outcome on the sheet**, in a status cell next to the buttons (errors in red, success in blue), as well as in the Output pane. Many users never open the pane.
-11. **Batch tools that call an API per row:** write each result as it finishes and `await book.flush()`, keep a status column (DONE / ERROR) so a re-run skips finished rows and keeps their results, and on a rate-limit or quota error stop cleanly and leave the remaining rows pending.
-12. **Sample data:** ship it in a table on a hidden sheet and copy it into the input sheet with a "Use Sample Data" script. Tables on hidden sheets read normally. [tested]
-13. **A HOW_IT_WORKS sheet** as the first sheet (steps, what each sheet holds, limits) helps both the user and the AI the user pastes it into.
+8. **Number scripts in run order:** `@script(name="1. Import Data")`, `@script(name="2. Build Summary")`. The Run dropdown and sheet buttons then read as steps.
+9. **Show the outcome on the sheet**, in a status cell next to the buttons (errors in red, success in blue), as well as in the Output pane. Many users never open the pane.
+10. **Batch tools that call an API per row:** write each result as it finishes and `await book.flush()`, keep a status column (DONE / ERROR) so a re-run skips finished rows and keeps their results, and on a rate-limit or quota error stop cleanly and leave the remaining rows pending.
+11. **Sample data:** ship it in a table on a hidden sheet and copy it into the input sheet with a "Use Sample Data" script. Tables on hidden sheets read normally. [tested]
+12. **A HOW_IT_WORKS sheet** as the first sheet (steps, what each sheet holds, limits) helps both the user and the AI the user pastes it into.
 
 ---
 
@@ -681,6 +683,7 @@ The run id makes sure you never read a stale result. A run usually returns in 1 
 
 ## Version History
 
+- **3.5 (26 October 2026):** Pointer to 13 ready-made tools and their code; clearer notes on reading with `expand` and on calling Neon.
 - **3.4 (24 October 2026):** Neon Postgres over HTTPS without a server, private GitHub files with a token, scikit-learn and XGBoost.
 - **3.3 (22 October 2026):** Databases (DuckDB, Parquet, SQLite), API keys in environment variables, web requests with retries, and conventions for batch tools, sheet buttons and status messages.
 - **3.2 (20 October 2026):** How an AI coding agent can run and test code in the user's Excel by itself.
