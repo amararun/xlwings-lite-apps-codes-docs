@@ -1,4 +1,4 @@
-> [\!NOTE]
+> [!NOTE]
 > This repository is a working example of the concept described below. It may not yet include all recommended security hardening measures. My newer repositories now have robust security at both frontend and backend layers: rate limiting, SQL validation, concurrency controls, error sanitization, and more. You can use this repo to understand the core concept, but please apply security best practices before deploying to production. See my [80+ item Security Checklist](https://tigzig.com/security) and [live hardened examples](https://tigzig.com/security-examples) for reference.
 
 # xlwings Lite Apps Collection
@@ -37,7 +37,7 @@ Also in this repo:
 1. Download the workbook from its folder.
 2. Open it in Excel and start xlwings Lite (Home > Add-ins).
 3. If the tool needs an API key, add it in xlwings Lite > Settings > Environment Variables, scope Local. The folder README says which one.
-4. Click the numbered buttons in order. The HOW_IT_WORKS sheet in each workbook explains each step.
+4. Click the buttons in order. Most workbooks have a HOW_IT_WORKS sheet that explains each step.
 
 ---
 

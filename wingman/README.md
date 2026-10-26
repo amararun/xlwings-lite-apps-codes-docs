@@ -10,7 +10,7 @@ Tool page: https://www.tigzig.com/xlwings-starter
 
 ## How to run
 
-Open the workbook in Excel and start xlwings Lite (Home > Add-ins). Click the numbered buttons in order. The HOW_IT_WORKS sheet explains each step.
+Open the workbook in Excel and start xlwings Lite (Home > Add-ins). Each example sheet has WINGMAN formulas; they recalculate once a model provider is set up.
 
 ## Keys and setup
 
