@@ -488,3 +488,34 @@ async def get_ai_report(book: xw.Book):
     msg = f"✅ Report ready for {symbol} ({model or 'default model'}). Click the links below (PDF and HTML)."
     print(msg, pdf, html)
     set_status(book, msg, ok=True)
+
+
+# -------------------------
+# Custom app helpers (index.html)
+# -------------------------
+@script(name="Set ticker")
+async def set_ticker(book: xw.BookAsync, symbol: str) -> str:
+    """Write the ticker typed in the custom app to MASTER!C7, where the other scripts read it."""
+    cleaned = str(symbol or "").strip().upper()
+    if not cleaned:
+        raise ValueError(
+            "Type a Yahoo Finance symbol, for example GOOG or RELIANCE.NS."
+        )
+    book.sheets[CONTROL][SYMBOL_CELL].value = cleaned
+    return cleaned
+
+
+@script(name="Read status")
+async def read_status(book: xw.BookAsync) -> str:
+    """Return the status text the last run wrote to MASTER!A23."""
+    value = await book.sheets[CONTROL][STATUS_CELL].get_value()
+    return str(value or "")
+
+
+@script(name="Read report links")
+async def read_report_links(book: xw.BookAsync) -> dict:
+    """Return the PDF and HTML report URLs that the AI Report run wrote to MASTER!A27:A28."""
+    c = book.sheets[CONTROL]
+    pdf = await c[f"A{LINK_ROW + 2}"].get_value()
+    html = await c[f"A{LINK_ROW + 3}"].get_value()
+    return {"pdf": str(pdf or ""), "html": str(html or "")}

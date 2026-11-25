@@ -1,0 +1,165 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      .ylens-page {
+        color: #000;
+        background: #fff;
+        font-family: Arial, sans-serif;
+        font-size: 14px;
+      }
+      .ylens-page .ylens-title {
+        font-size: 18px;
+        font-weight: 700;
+        margin: 0 0 12px 0;
+      }
+      .ylens-page .ylens-label {
+        display: block;
+        font-weight: 700;
+        margin-bottom: 4px;
+      }
+      .ylens-page .ylens-input {
+        display: block;
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid #000;
+        border-radius: 0;
+        padding: 6px;
+        color: #000;
+        background: #fff;
+        margin-bottom: 12px;
+      }
+      .ylens-page .ylens-button {
+        display: block;
+        width: 100%;
+        box-sizing: border-box;
+        margin-bottom: 8px;
+        padding: 8px;
+        border: 1px solid #000;
+        border-radius: 0;
+        background: #fff;
+        color: #000;
+        text-align: left;
+        font: inherit;
+        cursor: pointer;
+      }
+      .ylens-page .ylens-button:hover:not(:disabled) {
+        background: #000;
+        color: #fff;
+      }
+      .ylens-page .ylens-button:disabled {
+        color: #808080;
+        border-color: #808080;
+        cursor: default;
+      }
+      .ylens-page .ylens-status {
+        margin: 12px 0 0 0;
+        padding: 8px;
+        border: 1px solid #000;
+        min-height: 2.5em;
+        white-space: pre-wrap;
+      }
+      .ylens-page .ylens-note {
+        margin: 0 0 12px 0;
+        font-size: 12px;
+      }
+      .ylens-page .ylens-links {
+        margin: 12px 0 0 0;
+        padding: 8px;
+        border: 1px solid #000;
+        display: flex;
+        gap: 16px;
+      }
+      .ylens-page .ylens-links[hidden] {
+        display: none;
+      }
+      .ylens-page a {
+        color: #000;
+        text-decoration: underline;
+      }
+      .ylens-page .ylens-footer {
+        margin: 16px 0 0 0;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="ylens-page">
+      <h1 class="ylens-title">YLENS: Yahoo Finance Analyzer</h1>
+      <label class="ylens-label" for="ylens-ticker">Ticker</label>
+      <input id="ylens-ticker" class="ylens-input" type="text" placeholder="for example GOOG or RELIANCE.NS" autocomplete="off" />
+      <div class="ylens-note">
+        <div>Writes to:</div>
+        <div>1. Company Profile: PROFILE</div>
+        <div>2. Financial Statements: PL, BS, CF, QTLY</div>
+        <div>3. Prices &amp; Charts: PRICES_DAILY, PRICES_WEEKLY, CHARTS</div>
+        <div>4. AI Report: MASTER A25:A28</div>
+      </div>
+      <button type="button" class="ylens-button" data-script="get_profile" data-label="Company Profile">1. Company Profile</button>
+      <button type="button" class="ylens-button" data-script="get_financials" data-label="Financial Statements">2. Financial Statements</button>
+      <button type="button" class="ylens-button" data-script="create_technicals" data-label="Prices &amp; Charts">3. Prices &amp; Charts</button>
+      <button type="button" class="ylens-button" data-script="get_ai_report" data-label="AI Report">4. AI Report (PDF + HTML)</button>
+      <p id="ylens-status" class="ylens-status" role="status" aria-live="polite"></p>
+      <div id="ylens-links" class="ylens-links" hidden></div>
+      <p class="ylens-footer">Built on xlwings Lite. More tools at <a href="https://tigzig.com" target="_blank" rel="noopener">tigzig.com</a></p>
+    </div>
+    <script>
+      const tickerInput = document.getElementById("ylens-ticker");
+      const statusBox = document.getElementById("ylens-status");
+      const runButtons = Array.from(document.querySelectorAll("button[data-script]"));
+
+      function setStatus(text) {
+        statusBox.textContent = text;
+      }
+
+      async function showReportLinks() {
+        const links = await xlwings.runScript("read_report_links", []);
+        const box = document.getElementById("ylens-links");
+        box.replaceChildren();
+        [["Open PDF report", links.pdf], ["Open HTML report", links.html]].forEach(([label, url]) => {
+          if (!url || !url.startsWith("https://")) {
+            return;
+          }
+          const anchor = document.createElement("a");
+          anchor.href = url;
+          anchor.target = "_blank";
+          anchor.rel = "noopener";
+          anchor.textContent = label;
+          box.append(anchor);
+        });
+        box.hidden = box.childElementCount === 0;
+      }
+
+      async function runReport(button) {
+        const symbol = tickerInput.value.trim();
+        if (!symbol) {
+          setStatus("Type a ticker first.");
+          tickerInput.focus();
+          return;
+        }
+        // Only one script runs at a time, so block the other buttons until this run ends.
+        runButtons.forEach((b) => (b.disabled = true));
+        setStatus(`Running ${button.dataset.label} for ${symbol} ...`);
+        document.getElementById("ylens-links").hidden = true;
+        try {
+          await xlwings.runScript("set_ticker", [symbol]);
+          await xlwings.runScript(button.dataset.script, []);
+          const text = await xlwings.runScript("read_status", []);
+          setStatus(text || "Done.");
+          if (button.dataset.script === "get_ai_report") {
+            await showReportLinks();
+          }
+        } catch (err) {
+          setStatus(`Error: ${err.message}`);
+        } finally {
+          runButtons.forEach((b) => (b.disabled = false));
+        }
+      }
+
+      runButtons.forEach((button) => {
+        button.addEventListener("click", () => runReport(button));
+      });
+    </script>
+  </body>
+</html>
