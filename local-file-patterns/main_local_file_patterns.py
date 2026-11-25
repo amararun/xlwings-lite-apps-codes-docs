@@ -311,7 +311,7 @@ async def s1_download_zip(book: xw.Book):
 # PHASE 2: UNZIP AND CONCATENATE
 # =============================================================================
 
-@script(name="2. Combine CSVs", button="[btn_s2]MASTER!D9")
+@script(name="2. Combine CSVs", button="[btn_s2]MASTER!E9")
 async def s2_process_zip(book: xw.Book):
     """
     Unzip and concatenate all ball-by-ball CSVs into single file.
@@ -760,7 +760,7 @@ def create_bowling_chart(df: pd.DataFrame, match_type: str, num_players: int = 1
     return chart_path
 
 
-@script(name="4. Run Stats", button="[btn_s4]MASTER!D11")
+@script(name="4. Run Stats", button="[btn_s4]MASTER!E11")
 async def s4_run_stats(book: xw.Book):
     """
     Run cricket statistics analysis and create charts.
@@ -1266,7 +1266,7 @@ async def ensure_reportlab_installed():
         print("   Installing reportlab via micropip...")
         try:
             import micropip  # ty: ignore[unresolved-import]
-            await micropip.install("reportlab")
+            await micropip.install("reportlab==5.1.0")  # 5.1.1 (24 Nov 2026) needs pillow>=13, not in Pyodide 314
             print("   ReportLab installed successfully")
             return True
         except Exception as e:
@@ -1406,7 +1406,7 @@ def create_pdf_report(batting_df: pd.DataFrame, bowling_df: pd.DataFrame,
     doc.build(elements)
 
 
-@script(name="6. PDF Report", button="[btn_s6]MASTER!D13")
+@script(name="6. PDF Report", button="[btn_s6]MASTER!E13")
 async def s6_generate_pdf(book: xw.Book):
     """
     Generate PDF report with ReportLab.
@@ -1714,7 +1714,7 @@ def get_email_html_template(match_type: str) -> str:
     """
 
 
-@script(name="8. Send Email", button="[btn_s8]MASTER!D15")
+@script(name="8. Send Email", button="[btn_s8]MASTER!E15")
 async def s8_send_email(book: xw.Book):
     """
     Send email with PDF and HTML report as attachments via Brevo.
@@ -1865,7 +1865,7 @@ async def ensure_pptx_installed():
     except ImportError:
         print("   Installing python-pptx via micropip...")
         import micropip  # ty: ignore[unresolved-import]
-        await micropip.install("python-pptx")
+        await micropip.install("python-pptx==1.0.2")  # pinned: a new release cannot break this step
         print("   python-pptx installed successfully")
 
 
