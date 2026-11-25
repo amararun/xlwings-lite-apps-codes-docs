@@ -1,8 +1,8 @@
 # xlwings Lite: Coding Guidelines for AI Coders (Humans Welcome)
 
-**Version 3.6 · 3 November 2026.** The latest copy is always at https://www.tigzig.com/files/xlwings/AI_CODER_INSTRUCTIONS.md. If your copy shows a lower version number, download the latest. Changes are listed under Version History at the end.
+**Version 3.7 · 25 November 2026.** The latest copy is always at https://www.tigzig.com/files/xlwings/AI_CODER_INSTRUCTIONS.md. If your copy shows a lower version number, download the latest. Changes are listed under Version History at the end.
 
-**Tested on:** xlwings Lite add-in build 1.0.0.107 (the Python package inside it: xlwings 0.37.8), Pyodide 314.0.1 (Python 3.14.2, pandas 3.0.2, numpy 2.4.3), Excel desktop on Windows. Every platform behaviour marked **[tested]** was run in Excel on that build. Items marked **[docs]** come from the official documentation and were not re-run here.
+**Tested on:** xlwings Lite add-in build 1.0.0.113 (the Python package inside it: xlwings 0.37.12), Pyodide 314.0.1 (Python 3.14.2, pandas 3.0.2, numpy 2.4.3), Excel desktop on Windows. Every platform behaviour marked **[tested]** was run in Excel on that build. Items marked **[docs]** come from the official documentation and were not re-run here.
 
 **Official docs:** https://lite.xlwings.org (machine-readable: https://lite.xlwings.org/llms-full.txt). If something here disagrees with a newer build, trust the build and the docs.
 
@@ -28,6 +28,8 @@
 14. **Activate the final output sheet** with `sheet.activate()` so the user sees the result. When the script runs from a sheet button, the add-in jumps back to the button's sheet afterwards (section 3.4). [tested]
 15. **Print progress** at each major step. `print()` output appears in the Output pane when the script ends, or right away after `await book.flush()`. [tested]
 16. **API keys come from environment variables, never from cells or code:** `os.getenv("GEMINI_API_KEY")`, set by the user in Local scope (section 13). A key in a cell or in `main.py` travels with every copy of the file.
+17. **Never put two sheet-button cells directly above each other.** After a button runs, the add-in selects the cell below its linked cell. If that cell is another button's linked cell, that script runs too, and the next, down the column. Leave a gap row, or alternate columns (section 2.4). [tested]
+18. **Pin packages you install at run time:** `await micropip.install("reportlab==5.1.0")`, not `micropip.install("reportlab")`. An unpinned install takes the newest release, which may need a newer dependency than Pyodide ships (section 10). [tested]
 
 ---
 
@@ -41,7 +43,7 @@
 - **Output:** `print()` goes to the Output pane.
 - **Trust:** a workbook the user didn't author asks "Do you trust the Authors of this workbook?" before any code runs. [docs]
 - **Autostart:** the add-in can start with the workbook (Settings > Workbook). [docs]
-- **App Mode:** hides the editor and shows only script buttons and forms for end users (Ctrl+Shift+M toggles). [docs]
+- **App Mode:** hides the editor and shows only script buttons and forms for end users (Ctrl+Shift+M toggles). It can show your own HTML page instead (section 2.5). [tested]
 - **Undo:** Excel's Undo button can undo most changes a script makes (build 1.0.0.105 and later). [docs]
 - **Wingman:** xlwings Lite has a built-in AI agent, Wingman, in the task pane (needs xlwings >= 0.37.8 in the workbook). The `=WINGMAN()` custom function is off by default; turn it on under Settings > Local > Wingman. [docs]
 - **Pyodide version** is per workbook (Settings > Workbook). 314.x = Python 3.14 + pandas 3; 0.27.5 = older stack with pandas 2. Changing it can change package major versions. [docs]
@@ -100,7 +102,28 @@ How it works: the add-in runs the script when that cell is SELECTED, then select
 - Don't leave the linked cell selected when saving.
 - Scripts that depend on the user's current selection don't work from a button (the click changes the selection).
 - Because the add-in re-selects the cell under the button after the run, **an `activate()` at the end of a button-run script is undone**: Excel returns to the button's sheet. [tested]
+- **Chained buttons:** the cell the add-in selects after a run is the cell below the linked cell. If that is another button's linked cell, that button fires too. Link stacked buttons to cells with a gap row between them, or alternate columns (`D8`, `E9`, `D10`, ...). [tested]
 - Excel on the web can't add hyperlinks to shapes, but buttons set up on desktop work on the web. [docs]
+
+### 2.5 Custom App: your own page in App Mode [tested]
+Add a source file named `index.html` (optionally `.css` and `.js` files beside it). In App Mode the task pane shows that page instead of the default buttons. The page calls Python scripts with `xlwings.runScript()` and gets back what the script returns:
+```python
+@script
+async def set_ticker(book: xw.BookAsync, symbol: str) -> str:
+    book.sheets["MASTER"]["C7"].value = symbol.strip().upper()
+    return symbol.strip().upper()
+```
+```js
+// in index.html or app.js
+const value = await xlwings.runScript("set_ticker", [tickerInput.value]);   // args after book, in order
+await xlwings.runScript("get_profile", []);                                  // an existing script
+```
+- Scripts can return a value to the page from xlwings 0.37.11 on; on an older pinned version the call returns nothing. [docs]
+- Only one script runs at a time: disable your buttons until the promise settles, and catch errors to show them on the page.
+- An existing tool can get a page without changing its scripts: add small helper scripts that write the inputs to the cells the scripts already read, and read back the status cell. Sheet buttons keep working.
+- The page's JavaScript runs in the pane, so Python can fetch and prepare data once and JavaScript can react instantly (sliders, filters, input checks) without a script run per change.
+- Bootstrap 5.3 is built in. Start every CSS selector with a class on your page's wrapper (e.g. `.my-app .title`); unscoped selectors restyle xlwings Lite's own controls. [docs]
+- After editing the page, switch App Mode off and on again to reload it. [docs]
 
 ---
 
@@ -294,7 +317,7 @@ def describe(df):
 def myfunction(df: pd.DataFrame) -> pd.DataFrame:   # type hints work instead of decorators
     return df
 ```
-Also available: `*args`, docstrings and `@arg(doc=...)` for Excel IntelliSense, `typing.Literal` parameters (dropdown while typing), `@func(name="MyName")`, namespaces (`__xlwings_func_namespace__`), dynamic arrays, volatile functions, object handles, streaming functions, `xw.Caller` (calling cell, xlwings >= 0.36.17), `xw.WithScript()` to run a script after the function returns (xlwings >= 0.36.17). See the Custom Functions page of the docs.
+Also available: `*args`, docstrings and `@arg(doc=...)` for Excel IntelliSense, `typing.Literal` parameters (dropdown while typing), `@func(name="MyName")`, namespaces (`__xlwings_func_namespace__`), dynamic arrays, volatile functions, object handles, streaming functions, `xw.Caller` (calling cell, xlwings >= 0.36.17), `xw.WithScript()` to run a script after the function returns (xlwings >= 0.36.17). See the Custom Functions page of the docs. In our test on build 1.0.0.113 the function returned its value but the script given to `WithScript` didn't run; check it on your build before relying on it. [tested]
 
 ### 8.2 Inputs: what your function actually receives [tested]
 | Cell content | Value received |
@@ -343,6 +366,16 @@ def debug_input(cell: Any) -> str:
 
 ---
 
+### 8.5 Native Excel functions (LAMBDA), no add-in needed [tested]
+A script can define a workbook-level LAMBDA. It then works in that workbook for anyone, including people who don't have xlwings Lite, and recalculates instantly:
+```python
+book.names.add("CAGR_X", "=LAMBDA(start_value,end_value,years,(end_value/start_value)^(1/years)-1)")
+sheet["F2"].formula = "=CAGR_X(B2,C2,D2)"
+```
+`LET`, `SEQUENCE`, `SCAN` and `HSTACK` work inside them, so rolling returns or a max drawdown with its dates fit in one spilled formula. Use this when the user wants formulas they can hand to others; use `@func` when the logic needs Python libraries.
+
+---
+
 ## 9. Files [docs]
 
 - `/data` is the working directory. Relative paths read and write there. Files appear under Menu > Files > Import/Export, where users can also upload files (drag and drop). They are deleted when the Office cache is cleared.
@@ -356,11 +389,15 @@ def debug_input(cell: Any) -> str:
 ## 10. Dependencies
 
 - List packages in `requirements.txt`, then restart the add-in (Menu > Restart). [docs]
+- `# no pin` after a line in `requirements.txt` (e.g. `plotly  # no pin`) keeps that package off the automatic pinning, so it installs the latest release on every start. [docs]
+- `pyodide-http` is no longer required (build 1.0.0.112 and later); existing workbooks can keep it or remove it. [docs]
+- **Plugins:** a Python package listed in `requirements.txt` can register scripts and custom functions in the workbook with no code in `main.py`, e.g. `xlwings-sqlookup` adds `=SQLOOKUP()`. [docs]
 - xlwings Lite records exact installed versions in `requirements-pinned.txt` (Pyodide 314+) and reinstalls them on every restart. Don't pin exact versions in `requirements.txt`; use an upper bound if needed (`xlwings<1.0.0`). [docs]
 - Packages must be pure Python or built for Pyodide. Not available: anything needing `multiprocessing`/`threading`, PyTorch, direct TCP clients. [docs]
 - Not installed by default on the tested build: `requests`, `httpx`, `polars`. [tested]
 - `scikit-learn` and `xgboost` install from `requirements.txt` and run (scikit-learn 1.8, xgboost 2.1.4). [tested]
 - Quick trial without editing requirements: `import micropip; await micropip.install("requests")` inside an async script works. For a finished tool, put the package in `requirements.txt`. [tested]
+- **If a tool installs a package at run time, pin the version.** `micropip.install("reportlab")` started failing on 24 November 2026: reportlab 5.1.1 needs `pillow>=13`, and Pyodide 314 ships pillow 12.2.0. `micropip.install("reportlab==5.1.0")` works. [tested]
 - Private wheels: a CORS-enabled URL in `requirements.txt`, or `/data/my-package.whl` after uploading. [docs]
 
 ---
@@ -519,6 +556,9 @@ if df["X"].isna().any():
 | Leading zeros / IDs / codes changed in Excel | Auto-conversion of strings | `number_format = "@"` before writing |
 | `GeneralException: Cell X has a property "0" which isn't recognized` | A `bytes` value in the data (common with Parquet text columns) | `.decode("utf-8")` the column before writing |
 | `ModuleNotFoundError` | Package not in `requirements.txt` | Add it and restart |
+| `Failed to install <package>` from a `micropip.install()` call that used to work | A new release needs a dependency version Pyodide doesn't ship | Pin the last working version (section 10) |
+| One sheet button runs several scripts in a row | Button cells stacked directly above each other | Gap row or alternate columns (section 2.4) |
+| Task pane stays on "Restoring file mounts..." in every workbook | A mounted folder needs re-authorising and the prompt doesn't appear; reinstalling the add-in doesn't reset it | Clear the Office cache (File > Options > Trust Center > Trust Center Settings > Trusted Add-in Catalogs), restart Excel, mount the folder again |
 | CORS error on a request | Server doesn't allow `https://addin.xlwings.org` | Add the header, or use your own CORS proxy |
 | Custom function shows `#VALUE!` | A `None` (blank cell) reached arithmetic, or the module has an error | Section 8.2 and 8.4 |
 | Custom function returns a strange repeated string like `abcabc` | Text was multiplied: type hints don't convert | Section 8.2 |
@@ -687,6 +727,7 @@ The run id makes sure you never read a stale result. A run usually returns in 1 
 
 ## Version History
 
+- **3.7 (25 November 2026):** Re-tested on build 1.0.0.113: Custom App pages, native LAMBDA functions from a script, stacked sheet buttons, pinning run-time installs; notes on plugins, `# no pin` and the "Restoring file mounts" fix.
 - **3.6 (3 November 2026):** Re-tested on add-in build 1.0.0.107: column width, row height, merge, wrap text, `.formula =`, autofill, sheet copy and save now work; reading formats back works with the async getters; `column_width` is in points. Notes on Undo and Wingman.
 - **3.5 (26 October 2026):** Pointer to 13 ready-made tools and their code; clearer notes on reading with `expand` and on calling Neon.
 - **3.4 (24 October 2026):** Neon Postgres over HTTPS without a server, private GitHub files with a token, scikit-learn and XGBoost.
